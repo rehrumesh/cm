@@ -129,25 +129,6 @@ go mod download
 make build
 ```
 
-### Available Make Targets
-
-| Target | Description |
-|--------|-------------|
-| `make build` | Build for current platform |
-| `make build-all` | Cross-compile for all platforms |
-| `make install` | Build and install to ~/.local/bin |
-| `make uninstall` | Remove from ~/.local/bin |
-| `make run` | Build and run |
-| `make dev` | Run with hot reload (requires air) |
-| `make test` | Run tests with race detection |
-| `make coverage` | Run tests with coverage report |
-| `make lint` | Run golangci-lint |
-| `make fmt` | Format code with go fmt |
-| `make vet` | Run go vet |
-| `make tidy` | Tidy go.mod dependencies |
-| `make clean` | Remove build artifacts |
-| `make help` | Show all targets |
-
 ### Hot Reloading
 
 For development with automatic rebuilds on file changes:
@@ -228,59 +209,13 @@ Monitor logs from selected containers:
 
 ## Configuration
 
-cm stores configuration in `~/.cm/` directory with three separate files:
+cm stores configuration in `~/.cm/` directory:
 
 | File | Purpose |
 |------|---------|
-| `config.json` | General settings (notifications) |
-| `keybindings.json` | Customizable key bindings |
-| `projects.json` | Saved compose projects (auto-populated) |
-
-### config.json
-
-```json
-{
-  "notifications": {
-    "mode": "terminal",
-    "toast_duration": 3,
-    "toast_position": "bottom-right"
-  }
-}
-```
-
-### keybindings.json
-
-```json
-{
-  "up": "up,k",
-  "down": "down,j",
-  "select": "space",
-  "confirm": "enter",
-  "quit": "q,ctrl+c",
-  "refresh": "ctrl+r",
-  "start": "u",
-  "stop": "s",
-  "restart": "r",
-  "compose_build": "b",
-  "saved_projects_key": "p",
-  "config": "c"
-}
-```
-
-### projects.json
-
-Automatically populated when cm detects compose projects:
-
-```json
-{
-  "saved_projects": {
-    "myapp": {
-      "config_file": "/path/to/docker-compose.yml",
-      "working_dir": "/path/to/project"
-    }
-  }
-}
-```
+| `config.json` | General settings (notifications, toast duration/position) |
+| `keybindings.json` | Customizable key bindings for all actions |
+| `projects.json` | Saved compose projects (auto-populated when detected) |
 
 ## Project Structure
 
@@ -367,10 +302,6 @@ Make sure `~/go/bin` is in your PATH:
 ```bash
 export PATH="$HOME/go/bin:$PATH"
 ```
-
-### App gets killed (OOM)
-
-This was fixed in recent versions. If you experience this, update to the latest version and ensure you're not running an old build.
 
 ## Acknowledgments
 
