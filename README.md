@@ -38,11 +38,18 @@ A terminal UI application for monitoring Docker container logs in real-time with
 
 ## Installation
 
-### Quick Install (From Source)
+### Homebrew (Recommended)
+
+```bash
+brew tap rehrumesh/tap
+brew install cm
+```
+
+### From Source
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/cm.git
+git clone https://github.com/rehrumesh/cm.git
 cd cm
 
 # Install dependencies and build
@@ -106,7 +113,7 @@ dist/
 
 ```bash
 # Clone and enter directory
-git clone https://github.com/yourusername/cm.git
+git clone https://github.com/rehrumesh/cm.git
 cd cm
 
 # Download dependencies
