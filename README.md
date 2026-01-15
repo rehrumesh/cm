@@ -228,16 +228,52 @@ Monitor logs from selected containers:
 
 ## Configuration
 
-cm stores configuration in `~/.cm/config.json`. This file is auto-generated and includes:
+cm stores configuration in `~/.cm/` directory with three separate files:
 
-- Compose project paths for cross-directory operation
-- Custom infrastructure service patterns (optional)
+| File | Purpose |
+|------|---------|
+| `config.json` | General settings (notifications) |
+| `keybindings.json` | Customizable key bindings |
+| `projects.json` | Saved compose projects (auto-populated) |
 
-### Example Config
+### config.json
 
 ```json
 {
-  "compose_projects": {
+  "notifications": {
+    "mode": "terminal",
+    "toast_duration": 3,
+    "toast_position": "bottom-right"
+  }
+}
+```
+
+### keybindings.json
+
+```json
+{
+  "up": "up,k",
+  "down": "down,j",
+  "select": "space",
+  "confirm": "enter",
+  "quit": "q,ctrl+c",
+  "refresh": "ctrl+r",
+  "start": "u",
+  "stop": "s",
+  "restart": "r",
+  "compose_build": "b",
+  "saved_projects_key": "p",
+  "config": "c"
+}
+```
+
+### projects.json
+
+Automatically populated when cm detects compose projects:
+
+```json
+{
+  "saved_projects": {
     "myapp": {
       "config_file": "/path/to/docker-compose.yml",
       "working_dir": "/path/to/project"
@@ -250,7 +286,7 @@ cm stores configuration in `~/.cm/config.json`. This file is auto-generated and 
 
 ```
 cm/
-├── main.go                      # Entry point, CLI flags
+├── main.go                      # Entry point, CLI flags, help text
 ├── go.mod                       # Go module definition
 ├── go.sum                       # Dependency checksums
 ├── Makefile                     # Build automation
@@ -263,17 +299,21 @@ cm/
 ├── tmp/                         # Air temp directory (git-ignored)
 └── internal/
     ├── config/
-    │   └── config.go            # Configuration management
+    │   └── config.go            # Configuration management (3 files)
     ├── docker/
-    │   ├── client.go            # Docker client wrapper
+    │   ├── client.go            # Docker client, compose actions
     │   ├── container.go         # Container types and grouping
-    │   ├── compose.go           # Compose file parsing
     │   └── logs.go              # Log streaming
+    ├── notify/
+    │   └── notify.go            # Toast notifications
     └── ui/
         ├── app.go               # Root application model
         ├── common/
         │   ├── keys.go          # Key bindings
-        │   └── styles.go        # UI styles (Lip Gloss)
+        │   ├── styles.go        # UI styles (Lip Gloss)
+        │   ├── toast.go         # Toast notification component
+        │   ├── configmodal.go   # Configuration modal
+        │   └── savedprojects.go # Saved projects modal
         ├── discovery/
         │   └── model.go         # Container selection screen
         └── logview/
