@@ -40,9 +40,8 @@ func (c Container) DisplayName() string {
 
 // ContainerGroup groups containers by compose project
 type ContainerGroup struct {
-	ProjectName            string
-	Containers             []Container
-	InfrastructureServices map[string]bool // services with no depends_on
+	ProjectName string
+	Containers  []Container
 }
 
 // composeFileHeader is used to parse just the name field from compose files
@@ -167,9 +166,8 @@ func GroupByComposeProject(containers []Container, priorityProject string) []Con
 		})
 
 		result = append(result, ContainerGroup{
-			ProjectName:            name,
-			Containers:             projectContainers,
-			InfrastructureServices: nil, // Disabled for now
+			ProjectName: name,
+			Containers:  projectContainers,
 		})
 	}
 

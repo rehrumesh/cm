@@ -95,4 +95,49 @@ var (
 	// Inline muted text (no margin)
 	MutedInlineStyle = lipgloss.NewStyle().
 				Foreground(mutedColor)
+
+	// Modal styles
+	ModalOverlayStyle = lipgloss.NewStyle().
+				Background(lipgloss.Color("0"))
+
+	ModalStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(primaryColor).
+			Background(lipgloss.Color("235")).
+			Padding(1, 2)
+
+	ModalTitleStyle = lipgloss.NewStyle().
+				Bold(true).
+				Foreground(primaryColor).
+				MarginBottom(1)
+
+	ModalLabelStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252")).
+				Width(20)
+
+	ModalValueStyle = lipgloss.NewStyle().
+				Foreground(successColor)
+
+	ModalSelectedStyle = lipgloss.NewStyle().
+				Foreground(primaryColor).
+				Bold(true)
+
+	ModalButtonStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252")).
+				Background(lipgloss.Color("240")).
+				Padding(0, 2).
+				MarginRight(1)
+
+	ModalButtonActiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("235")).
+				Background(primaryColor).
+				Bold(true).
+				Padding(0, 2).
+				MarginRight(1)
+
+	ModalDangerButtonStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252")).
+				Background(errorColor).
+				Padding(0, 2).
+				MarginRight(1)
 )

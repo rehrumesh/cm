@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"cm/internal/docker"
@@ -29,9 +30,11 @@ type LoadErrorMsg struct {
 
 type autoRefreshTickMsg struct{}
 
-type actionCompleteMsg struct {
-	action string
-	err    error
+type bulkActionCompleteMsg struct {
+	action    string
+	succeeded int
+	failed    int
+	errors    []string
 }
 
 type actionStartedMsg struct {
@@ -49,7 +52,11 @@ type Model struct {
 	err           error
 	keys          common.KeyMap
 	dockerClient  *docker.Client
-	actionStatus  string // Current action status message
+	actionStatus  string
+	actionRunning bool
+	configModal   common.ConfigModal
+	savedProjectsModal    common.SavedProjectsModal
+	toast         common.Toast
 }
 
 type listItem struct {
@@ -59,16 +66,28 @@ type listItem struct {
 	container   docker.Container
 }
 
+// selectionKey returns a stable key for selecting a container
+// Uses compose project:service for compose containers, or ID for standalone
+func selectionKey(c docker.Container) string {
+	if c.ComposeProject != "" && c.ComposeService != "" {
+		return c.ComposeProject + ":" + c.ComposeService
+	}
+	return c.ID
+}
+
 // New creates a new discovery model
 func New(dockerClient *docker.Client, initialSelection []docker.Container) Model {
 	selected := make(map[string]bool)
 	for _, c := range initialSelection {
-		selected[c.ID] = true
+		selected[selectionKey(c)] = true
 	}
 	return Model{
 		selected:     selected,
 		keys:         common.DefaultKeyMap(),
 		dockerClient: dockerClient,
+		configModal:  common.NewConfigModal(),
+		savedProjectsModal:   common.NewSavedProjectsModal(),
+		toast:        common.NewToast(),
 	}
 }
 
@@ -83,7 +102,6 @@ func (m Model) loadContainers() tea.Cmd {
 		if err != nil {
 			return LoadErrorMsg{Err: err}
 		}
-		// Detect if we're in a directory with a compose file
 		localProject := docker.DetectLocalComposeProject()
 		groups := docker.GroupByComposeProject(containers, localProject)
 		return ContainersLoadedMsg{Groups: groups}
@@ -92,49 +110,108 @@ func (m Model) loadContainers() tea.Cmd {
 
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	// Handle saved projects modal messages first
+	if m.savedProjectsModal.IsVisible() {
+		var cmd tea.Cmd
+		m.savedProjectsModal, cmd = m.savedProjectsModal.Update(msg)
+		return m, cmd
+	}
+
+	// Handle config modal messages
+	if m.configModal.IsVisible() {
+		var cmd tea.Cmd
+		m.configModal, cmd = m.configModal.Update(msg)
+		return m, cmd
+	}
+
+	// Handle modal closed messages
+	if closed, ok := msg.(common.ConfigModalClosedMsg); ok {
+		// Reload key bindings and toast settings in case they changed
+		m.keys = common.DefaultKeyMap()
+		if closed.ConfigChanged {
+			m.toast.ReloadConfig()
+		}
+		return m, nil
+	}
+
+	// Handle saved projects modal closed message
+	if _, ok := msg.(common.SavedProjectsClosedMsg); ok {
+		return m, nil
+	}
+
+	// Handle open saved projects modal message
+	if _, ok := msg.(common.OpenSavedProjectsMsg); ok {
+		return m, m.savedProjectsModal.Open()
+	}
+
+	// Handle toast messages
+	if _, ok := msg.(common.ShowToastMsg); ok {
+		var cmd tea.Cmd
+		m.toast, cmd = m.toast.Update(msg)
+		return m, cmd
+	}
+	if _, ok := msg.(common.ToastExpiredMsg); ok {
+		m.toast, _ = m.toast.Update(msg)
+		return m, nil
+	}
+
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.configModal.SetSize(msg.Width, msg.Height)
+		m.savedProjectsModal.SetSize(msg.Width, msg.Height)
 
 	case ContainersLoadedMsg:
 		m.groups = msg.Groups
 		m.flatList = m.buildFlatList()
 		m.ready = true
-		// Move cursor to first container (skip group headers)
 		if m.cursor == 0 || m.cursor >= len(m.flatList) {
 			for i, item := range m.flatList {
-				if !item.isGroup {
+				if !item.isGroup && !item.isSeparator {
 					m.cursor = i
 					break
 				}
 			}
 		}
-		// Schedule next refresh (5 seconds to reduce resource usage)
 		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 			return autoRefreshTickMsg{}
 		})
 
 	case autoRefreshTickMsg:
-		return m, m.loadContainers()
+		if !m.actionRunning {
+			return m, m.loadContainers()
+		}
 
 	case actionStartedMsg:
 		m.actionStatus = msg.action
-		return m, nil
+		m.actionRunning = true
 
-	case actionCompleteMsg:
-		m.actionStatus = ""
-		if msg.err != nil {
-			m.actionStatus = fmt.Sprintf("Error: %v", msg.err)
+	case bulkActionCompleteMsg:
+		m.actionRunning = false
+		var toastCmd tea.Cmd
+		if msg.failed == 0 {
+			m.actionStatus = fmt.Sprintf("%s completed (%d succeeded)", msg.action, msg.succeeded)
+			toastCmd = m.toast.Show(capitalize(msg.action), fmt.Sprintf("%d containers", msg.succeeded), common.ToastSuccess)
+		} else {
+			m.actionStatus = fmt.Sprintf("%s: %d succeeded, %d failed", msg.action, msg.succeeded, msg.failed)
+			toastCmd = m.toast.Show(capitalize(msg.action), fmt.Sprintf("%d failed", msg.failed), common.ToastError)
 		}
-		// Refresh containers after action
-		return m, m.loadContainers()
+		return m, tea.Batch(toastCmd, m.loadContainers())
 
 	case LoadErrorMsg:
 		m.err = msg.Err
 		m.ready = true
 
 	case tea.KeyMsg:
+		if m.actionRunning {
+			// Only allow quit during action
+			if key.Matches(msg, m.keys.Quit) {
+				return m, tea.Quit
+			}
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			m.moveCursor(-1)
@@ -142,17 +219,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Down):
 			m.moveCursor(1)
 
+		case key.Matches(msg, m.keys.Top):
+			m.goToTop()
+
+		case key.Matches(msg, m.keys.Bottom):
+			m.goToBottom()
+
 		case key.Matches(msg, m.keys.Select):
-			if m.cursor >= 0 && m.cursor < len(m.flatList) {
-				item := m.flatList[m.cursor]
-				if !item.isGroup {
-					if m.selected[item.container.ID] {
-						delete(m.selected, item.container.ID)
-					} else {
-						m.selected[item.container.ID] = true
-					}
-				}
-			}
+			m.toggleSelect()
+
+		case key.Matches(msg, m.keys.SelectAll):
+			m.selectAll()
+
+		case key.Matches(msg, m.keys.ClearAll):
+			m.clearSelection()
 
 		case key.Matches(msg, m.keys.Confirm):
 			if len(m.selected) > 0 {
@@ -161,34 +241,27 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Refresh):
 			m.ready = false
+			m.actionStatus = ""
 			return m, m.loadContainers()
 
+		// Single container actions (on cursor)
 		case key.Matches(msg, m.keys.Start):
-			// Start the currently focused container
-			if m.cursor >= 0 && m.cursor < len(m.flatList) {
-				item := m.flatList[m.cursor]
-				if !item.isGroup && !item.isSeparator && item.container.ComposeService != "" {
-					return m, m.startContainer(item.container)
-				}
-			}
+			return m, m.doAction("start", m.getActionTargets(), m.dockerClient.ComposeUp)
 
-		case key.Matches(msg, m.keys.ComposeRestart):
-			// Restart (down/up) the currently focused container
-			if m.cursor >= 0 && m.cursor < len(m.flatList) {
-				item := m.flatList[m.cursor]
-				if !item.isGroup && !item.isSeparator && item.container.ComposeService != "" {
-					return m, m.restartContainer(item.container)
-				}
-			}
+		case key.Matches(msg, m.keys.Stop):
+			return m, m.doAction("stop", m.getActionTargets(), m.dockerClient.ComposeDown)
+
+		case key.Matches(msg, m.keys.Restart):
+			return m, m.doAction("restart", m.getActionTargets(), m.dockerClient.ComposeDownUp)
 
 		case key.Matches(msg, m.keys.ComposeBuild):
-			// Build and start the currently focused container
-			if m.cursor >= 0 && m.cursor < len(m.flatList) {
-				item := m.flatList[m.cursor]
-				if !item.isGroup && !item.isSeparator && item.container.ComposeService != "" {
-					return m, m.buildContainer(item.container)
-				}
-			}
+			return m, m.doAction("build", m.getActionTargets(), m.dockerClient.ComposeBuildUp)
+
+		case key.Matches(msg, m.keys.Config):
+			return m, m.configModal.Open()
+
+		case key.Matches(msg, m.keys.SavedProjects):
+			return m, m.savedProjectsModal.Open()
 
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -198,13 +271,152 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// getActionTargets returns selected containers, or the focused container if none selected
+func (m *Model) getActionTargets() []docker.Container {
+	var targets []docker.Container
+
+	// If containers are selected, use those
+	if len(m.selected) > 0 {
+		for _, item := range m.flatList {
+			if !item.isGroup && !item.isSeparator && m.selected[selectionKey(item.container)] {
+				if item.container.ComposeService != "" {
+					targets = append(targets, item.container)
+				}
+			}
+		}
+	} else {
+		// Otherwise use the focused container
+		if m.cursor >= 0 && m.cursor < len(m.flatList) {
+			item := m.flatList[m.cursor]
+			if !item.isGroup && !item.isSeparator && item.container.ComposeService != "" {
+				targets = append(targets, item.container)
+			}
+		}
+	}
+
+	return targets
+}
+
+type composeAction func(context.Context, docker.Container) error
+
+// capitalize returns a string with the first letter capitalized
+func capitalize(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
+}
+
+func (m Model) doAction(name string, targets []docker.Container, action composeAction) tea.Cmd {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	return tea.Batch(
+		func() tea.Msg {
+			if len(targets) == 1 {
+				return actionStartedMsg{action: fmt.Sprintf("%s %s...", capitalize(name), targets[0].ComposeService)}
+			}
+			return actionStartedMsg{action: fmt.Sprintf("%s %d containers...", capitalize(name), len(targets))}
+		},
+		func() tea.Msg {
+			var succeeded, failed int
+			var errors []string
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+
+			// Run actions concurrently with a semaphore
+			sem := make(chan struct{}, 3) // Max 3 concurrent actions
+
+			for _, cont := range targets {
+				wg.Add(1)
+				go func(c docker.Container) {
+					defer wg.Done()
+					defer func() {
+						if r := recover(); r != nil {
+							mu.Lock()
+							failed++
+							errors = append(errors, fmt.Sprintf("%s: panic: %v", c.ComposeService, r))
+							mu.Unlock()
+						}
+					}()
+					sem <- struct{}{}
+					defer func() { <-sem }()
+
+					err := action(context.Background(), c)
+					mu.Lock()
+					if err != nil {
+						failed++
+						errors = append(errors, fmt.Sprintf("%s: %v", c.ComposeService, err))
+					} else {
+						succeeded++
+					}
+					mu.Unlock()
+				}(cont)
+			}
+
+			wg.Wait()
+			return bulkActionCompleteMsg{
+				action:    name,
+				succeeded: succeeded,
+				failed:    failed,
+				errors:    errors,
+			}
+		},
+	)
+}
+
+func (m *Model) toggleSelect() {
+	if m.cursor >= 0 && m.cursor < len(m.flatList) {
+		item := m.flatList[m.cursor]
+		if !item.isGroup && !item.isSeparator {
+			key := selectionKey(item.container)
+			if m.selected[key] {
+				delete(m.selected, key)
+			} else {
+				m.selected[key] = true
+			}
+		}
+	}
+}
+
+func (m *Model) selectAll() {
+	for _, item := range m.flatList {
+		if !item.isGroup && !item.isSeparator {
+			m.selected[selectionKey(item.container)] = true
+		}
+	}
+}
+
+func (m *Model) clearSelection() {
+	m.selected = make(map[string]bool)
+}
+
+func (m *Model) goToTop() {
+	for i, item := range m.flatList {
+		if !item.isGroup && !item.isSeparator {
+			m.cursor = i
+			return
+		}
+	}
+}
+
+func (m *Model) goToBottom() {
+	for i := len(m.flatList) - 1; i >= 0; i-- {
+		item := m.flatList[i]
+		if !item.isGroup && !item.isSeparator {
+			m.cursor = i
+			return
+		}
+	}
+}
+
 func (m *Model) moveCursor(delta int) {
 	if len(m.flatList) == 0 {
 		return
 	}
 
 	newCursor := m.cursor + delta
-	// Skip group headers and separators
 	for newCursor >= 0 && newCursor < len(m.flatList) {
 		item := m.flatList[newCursor]
 		if !item.isGroup && !item.isSeparator {
@@ -229,31 +441,7 @@ func (m Model) buildFlatList() []listItem {
 			groupName: group.ProjectName,
 		})
 
-		// Separate main services from infrastructure services
-		var mainServices, infraServices []docker.Container
 		for _, c := range group.Containers {
-			if group.InfrastructureServices[c.ComposeService] {
-				infraServices = append(infraServices, c)
-			} else {
-				mainServices = append(mainServices, c)
-			}
-		}
-
-		// Add main services first
-		for _, c := range mainServices {
-			items = append(items, listItem{
-				isGroup:   false,
-				container: c,
-			})
-		}
-
-		// Add separator and infrastructure services if any
-		if len(infraServices) > 0 && len(mainServices) > 0 {
-			items = append(items, listItem{
-				isSeparator: true,
-			})
-		}
-		for _, c := range infraServices {
 			items = append(items, listItem{
 				isGroup:   false,
 				container: c,
@@ -267,48 +455,16 @@ func (m Model) confirmSelection() tea.Cmd {
 	return func() tea.Msg {
 		var containers []docker.Container
 		for _, item := range m.flatList {
-			if !item.isGroup && m.selected[item.container.ID] {
+			if !item.isGroup && m.selected[selectionKey(item.container)] {
+				// Skip stopped containers - they don't exist yet and have no logs
+				if item.container.State == "stopped" {
+					continue
+				}
 				containers = append(containers, item.container)
 			}
 		}
 		return ContainerSelectedMsg{Containers: containers}
 	}
-}
-
-func (m Model) startContainer(cont docker.Container) tea.Cmd {
-	return tea.Batch(
-		func() tea.Msg {
-			return actionStartedMsg{action: fmt.Sprintf("Starting %s...", cont.ComposeService)}
-		},
-		func() tea.Msg {
-			err := m.dockerClient.ComposeUp(context.Background(), cont)
-			return actionCompleteMsg{action: "start", err: err}
-		},
-	)
-}
-
-func (m Model) restartContainer(cont docker.Container) tea.Cmd {
-	return tea.Batch(
-		func() tea.Msg {
-			return actionStartedMsg{action: fmt.Sprintf("Restarting %s...", cont.ComposeService)}
-		},
-		func() tea.Msg {
-			err := m.dockerClient.ComposeDownUp(context.Background(), cont)
-			return actionCompleteMsg{action: "restart", err: err}
-		},
-	)
-}
-
-func (m Model) buildContainer(cont docker.Container) tea.Cmd {
-	return tea.Batch(
-		func() tea.Msg {
-			return actionStartedMsg{action: fmt.Sprintf("Building %s...", cont.ComposeService)}
-		},
-		func() tea.Msg {
-			err := m.dockerClient.ComposeBuildUp(context.Background(), cont)
-			return actionCompleteMsg{action: "build", err: err}
-		},
-	)
 }
 
 // View renders the model
@@ -318,11 +474,20 @@ func (m Model) View() string {
 	}
 
 	if m.err != nil {
-		return fmt.Sprintf("\n  Error: %v\n\n  Press 'r' to retry or 'q' to quit.", m.err)
+		return fmt.Sprintf("\n  Error: %v\n\n  Press ctrl+r to retry or 'q' to quit.", m.err)
 	}
 
 	if len(m.flatList) == 0 {
-		return common.EmptyStateStyle.Render("\n\n  No running containers found.\n\n  Press 'r' to refresh or 'q' to quit.")
+		logo := `
+    ██████╗███╗   ███╗
+   ██╔════╝████╗ ████║
+   ██║     ██╔████╔██║
+   ██║     ██║╚██╔╝██║
+   ╚██████╗██║ ╚═╝ ██║
+    ╚═════╝╚═╝     ╚═╝ `
+		return common.TitleStyle.Render(logo) + "\n" +
+			common.SubtitleStyle.Render("   docker logs, beautifully") + "\n\n" +
+			common.EmptyStateStyle.Render("  No running containers found.\n\n  Press ctrl+r to refresh, 'p' for projects, 'q' to quit")
 	}
 
 	var b strings.Builder
@@ -337,7 +502,7 @@ func (m Model) View() string {
     ╚═════╝╚═╝     ╚═╝ `
 	b.WriteString(common.TitleStyle.Render(logo))
 	b.WriteString("\n")
-	b.WriteString(common.SubtitleStyle.Render("   container monitor ~ stream them logs"))
+	b.WriteString(common.SubtitleStyle.Render("   docker logs, beautifully"))
 	b.WriteString("\n\n")
 
 	// List
@@ -348,34 +513,26 @@ func (m Model) View() string {
 			continue
 		}
 
-		if item.isSeparator {
-			b.WriteString(common.MutedInlineStyle.Render("    ─── dependencies (auto-started) ───"))
-			b.WriteString("\n")
-			continue
-		}
 
-		// Cursor
 		cursor := "  "
 		if i == m.cursor {
 			cursor = "> "
 		}
 
-		// Checkbox
 		checkbox := "[ ]"
-		if m.selected[item.container.ID] {
+		if m.selected[selectionKey(item.container)] {
 			checkbox = common.CheckedStyle.Render("[x]")
 		}
 
-		// Container info
 		name := item.container.DisplayName()
 		isRunning := item.container.State == "running"
-		isStopped := item.container.State == "stopped" // Not started from compose
+		isStopped := item.container.State == "stopped"
 
-		status := common.StoppedStyle.Render("○") // exited
+		status := common.StoppedStyle.Render("○")
 		if isRunning {
 			status = common.RunningStyle.Render("●")
 		} else if isStopped {
-			status = common.MutedInlineStyle.Render("◌") // not started
+			status = common.MutedInlineStyle.Render("◌")
 		}
 
 		line := fmt.Sprintf("%s%s %s %s", cursor, checkbox, status, name)
@@ -386,7 +543,6 @@ func (m Model) View() string {
 		b.WriteString("  ")
 		b.WriteString(line)
 
-		// Show container ID and status for context
 		if i == m.cursor {
 			if isStopped {
 				b.WriteString(common.MutedInlineStyle.Render(" (not started)"))
@@ -404,41 +560,106 @@ func (m Model) View() string {
 	// Action status
 	if m.actionStatus != "" {
 		b.WriteString("\n")
-		b.WriteString(common.MutedInlineStyle.Render(fmt.Sprintf("  %s", m.actionStatus)))
+		style := common.MutedInlineStyle
+		if strings.Contains(m.actionStatus, "failed") {
+			style = common.StderrStyle
+		} else if strings.Contains(m.actionStatus, "completed") {
+			style = common.RunningStyle
+		}
+		b.WriteString(style.Render(fmt.Sprintf("  %s", m.actionStatus)))
 	}
 
-	// Help bar (unified style)
-	b.WriteString("\n")
-	helpBar := m.renderHelpBar()
-	b.WriteString(helpBar)
+	// Build main content area (everything except help bar)
+	mainContent := b.String()
 
+	// Create help bar
+	helpBar := m.renderHelpBar()
+
+	// Create toast line (empty if not visible)
+	var toastLine string
+	if m.toast.IsVisible() {
+		toastLine = m.renderInlineToast()
+	}
+
+	// Combine: main content at top, help bar at bottom, toast above help bar if visible
 	width := m.width
+	height := m.height
 	if width <= 0 {
 		width = 80
 	}
-	return lipgloss.NewStyle().MaxWidth(width).Render(b.String())
+	if height <= 0 {
+		height = 24
+	}
+
+	// Calculate how many lines we need for the bottom section
+	bottomSection := helpBar
+	if toastLine != "" {
+		bottomSection = toastLine + "\n" + helpBar
+	}
+
+	// Use Place to position content at top, leaving room for bottom section
+	bottomHeight := lipgloss.Height(bottomSection)
+	topHeight := height - bottomHeight
+	if topHeight < 1 {
+		topHeight = 1
+	}
+
+	topContent := lipgloss.Place(width, topHeight,
+		lipgloss.Left, lipgloss.Top,
+		mainContent,
+		lipgloss.WithWhitespaceChars(" "),
+	)
+
+	content := topContent + "\n" + bottomSection
+
+	// Overlay saved projects modal if visible
+	if m.savedProjectsModal.IsVisible() {
+		modalView := m.savedProjectsModal.View(width, height)
+		base := lipgloss.Place(width, height,
+			lipgloss.Left, lipgloss.Top,
+			content,
+			lipgloss.WithWhitespaceChars(" "),
+		)
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
+			base+"\n"+modalView)
+	}
+
+	// Overlay config modal if visible
+	if m.configModal.IsVisible() {
+		modalView := m.configModal.View(width, height)
+		base := lipgloss.Place(width, height,
+			lipgloss.Left, lipgloss.Top,
+			content,
+			lipgloss.WithWhitespaceChars(" "),
+		)
+		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
+			base+"\n"+modalView)
+	}
+
+	return content
 }
 
 func (m Model) renderHelpBar() string {
-	key := common.HelpKeyStyle.Render
-	desc := common.HelpDescStyle.Render
+	k := common.HelpKeyStyle.Render
+	d := common.HelpDescStyle.Render
 
 	selectedCount := len(m.selected)
 	var selectedText string
 	if selectedCount > 0 {
-		selectedText = desc(fmt.Sprintf(" %d selected  ", selectedCount))
+		selectedText = d(fmt.Sprintf(" %d selected  ", selectedCount))
 	} else {
 		selectedText = " "
 	}
 
 	help := selectedText +
-		key("space") + desc(":select") +
-		desc("  ") + key("enter") + desc(":logs") +
-		desc("  ") + key("s") + desc(":start") +
-		desc("  ") + key("R") + desc(":restart") +
-		desc("  ") + key("B") + desc(":build") +
-		desc("  ") + key("r") + desc(":refresh") +
-		desc("  ") + key("q") + desc(":quit")
+		k("spc") + d(":sel ") +
+		k("a") + d("/") + k("A") + d(":all/clr ") +
+		k("⏎") + d(":logs ") +
+		k("u") + d("/") + k("s") + d("/") + k("r") + d(":up/stop/restart ") +
+		k("b") + d(":build ") +
+		k("p") + d(":projects ") +
+		k("c") + d(":config ") +
+		k("q") + d(":quit")
 
 	width := m.width
 	if width <= 0 {
@@ -451,9 +672,27 @@ func (m Model) renderHelpBar() string {
 func (m Model) SelectedContainers() []docker.Container {
 	var containers []docker.Container
 	for _, item := range m.flatList {
-		if !item.isGroup && m.selected[item.container.ID] {
+		if !item.isGroup && m.selected[selectionKey(item.container)] {
 			containers = append(containers, item.container)
 		}
 	}
 	return containers
 }
+
+// renderInlineToast renders the toast as an inline notification bar
+func (m Model) renderInlineToast() string {
+	// Get toast content from the Toast component
+	toastContent := m.toast.RenderInline()
+
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+
+	// Right-align the toast for bottom-right appearance
+	return lipgloss.NewStyle().
+		Width(width).
+		Align(lipgloss.Right).
+		Render(toastContent)
+}
+

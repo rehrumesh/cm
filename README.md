@@ -45,6 +45,12 @@ brew tap rehrumesh/tap
 brew install cm
 ```
 
+#### Updating
+
+```bash
+brew upgrade cm
+```
+
 ### From Source
 
 ```bash
@@ -325,6 +331,10 @@ export PATH="$HOME/go/bin:$PATH"
 ### App gets killed (OOM)
 
 This was fixed in recent versions. If you experience this, update to the latest version and ensure you're not running an old build.
+
+## Acknowledgments
+
+This project was almost entirely built using [Claude Code](https://claude.ai/claude-code), Anthropic's AI coding assistant. From architecture decisions to bug fixes, Claude helped write the vast majority of this codebase.
 
 ## License
 

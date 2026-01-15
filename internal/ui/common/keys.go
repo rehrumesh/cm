@@ -10,24 +10,47 @@ import (
 
 // KeyMap defines the key bindings for the application
 type KeyMap struct {
-	Up             key.Binding
-	Down           key.Binding
-	Left           key.Binding
-	Right          key.Binding
-	ScrollUp       key.Binding
-	ScrollDown     key.Binding
-	Select         key.Binding
-	Confirm        key.Binding
-	Back           key.Binding
-	Quit           key.Binding
-	Help           key.Binding
-	Refresh        key.Binding
-	NextPane       key.Binding
-	PrevPane       key.Binding
-	Start          key.Binding
-	Restart        key.Binding
+	// Navigation
+	Up         key.Binding
+	Down       key.Binding
+	Left       key.Binding
+	Right      key.Binding
+	ScrollUp   key.Binding
+	ScrollDown key.Binding
+	Top        key.Binding
+	Bottom     key.Binding
+	NextPane   key.Binding
+	PrevPane   key.Binding
+
+	// Selection
+	Select    key.Binding
+	SelectAll key.Binding
+	ClearAll  key.Binding
+	Confirm   key.Binding
+	Back      key.Binding
+
+	// Container actions
+	Start   key.Binding
+	Stop    key.Binding
+	Restart key.Binding
+	Kill    key.Binding
+	Remove  key.Binding
+	Exec    key.Binding
+	Inspect key.Binding
+
+	// Compose actions
+	ComposeUp      key.Binding
+	ComposeDown    key.Binding
 	ComposeRestart key.Binding
 	ComposeBuild   key.Binding
+
+	// General
+	Refresh       key.Binding
+	Search        key.Binding
+	Help          key.Binding
+	Config        key.Binding
+	SavedProjects key.Binding
+	Quit          key.Binding
 }
 
 // parseKeys splits a comma-separated key string into a slice
@@ -46,64 +69,43 @@ func parseKeys(keys string) []string {
 	return result
 }
 
-// DefaultKeyMap returns the default key bindings, loaded from config if available
+// DefaultKeyMap returns the default key bindings, loaded from keybindings file
 func DefaultKeyMap() KeyMap {
-	cfg, _ := config.Load()
-	var bindings config.KeyBindings
-	if cfg != nil {
-		bindings = cfg.GetKeyBindings()
-	} else {
-		bindings = config.DefaultKeyBindings()
-	}
+	bindings := config.LoadKeyBindings()
 
 	return KeyMap{
+		// Navigation
 		Up: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Up)...),
-			key.WithHelp("↑", "pane up"),
+			key.WithHelp("↑/k", "up"),
 		),
 		Down: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Down)...),
-			key.WithHelp("↓", "pane down"),
+			key.WithHelp("↓/j", "down"),
 		),
 		Left: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Left)...),
-			key.WithHelp("←", "pane left"),
+			key.WithHelp("←", "left"),
 		),
 		Right: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Right)...),
-			key.WithHelp("→", "pane right"),
+			key.WithHelp("→", "right"),
 		),
 		ScrollUp: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.ScrollUp)...),
-			key.WithHelp("k", "scroll up"),
+			key.WithHelp("ctrl+u", "scroll up"),
 		),
 		ScrollDown: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.ScrollDown)...),
-			key.WithHelp("j", "scroll down"),
+			key.WithHelp("ctrl+d", "scroll down"),
 		),
-		Select: key.NewBinding(
-			key.WithKeys(parseKeys(bindings.Select)...),
-			key.WithHelp("space/x", "toggle select"),
+		Top: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Top)...),
+			key.WithHelp("g", "top"),
 		),
-		Confirm: key.NewBinding(
-			key.WithKeys(parseKeys(bindings.Confirm)...),
-			key.WithHelp("enter", "confirm"),
-		),
-		Back: key.NewBinding(
-			key.WithKeys(parseKeys(bindings.Back)...),
-			key.WithHelp("esc", "back"),
-		),
-		Quit: key.NewBinding(
-			key.WithKeys(parseKeys(bindings.Quit)...),
-			key.WithHelp("q", "quit"),
-		),
-		Help: key.NewBinding(
-			key.WithKeys(parseKeys(bindings.Help)...),
-			key.WithHelp("?", "help"),
-		),
-		Refresh: key.NewBinding(
-			key.WithKeys(parseKeys(bindings.Refresh)...),
-			key.WithHelp("r", "refresh"),
+		Bottom: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Bottom)...),
+			key.WithHelp("G", "bottom"),
 		),
 		NextPane: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.NextPane)...),
@@ -113,21 +115,101 @@ func DefaultKeyMap() KeyMap {
 			key.WithKeys(parseKeys(bindings.PrevPane)...),
 			key.WithHelp("shift+tab", "prev pane"),
 		),
+
+		// Selection
+		Select: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Select)...),
+			key.WithHelp("space", "select"),
+		),
+		SelectAll: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.SelectAll)...),
+			key.WithHelp("a", "select all"),
+		),
+		ClearAll: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ClearAll)...),
+			key.WithHelp("A", "clear all"),
+		),
+		Confirm: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Confirm)...),
+			key.WithHelp("enter", "confirm"),
+		),
+		Back: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Back)...),
+			key.WithHelp("esc", "back"),
+		),
+
+		// Container actions
 		Start: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Start)...),
-			key.WithHelp("s", "start"),
+			key.WithHelp("u", "start"),
+		),
+		Stop: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Stop)...),
+			key.WithHelp("s", "stop"),
 		),
 		Restart: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Restart)...),
 			key.WithHelp("r", "restart"),
 		),
+		Kill: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Kill)...),
+			key.WithHelp("K", "kill"),
+		),
+		Remove: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Remove)...),
+			key.WithHelp("D", "remove"),
+		),
+		Exec: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Exec)...),
+			key.WithHelp("e", "exec"),
+		),
+		Inspect: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Inspect)...),
+			key.WithHelp("i", "inspect"),
+		),
+
+		// Compose actions
+		ComposeUp: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ComposeUp)...),
+			key.WithHelp("U", "compose up"),
+		),
+		ComposeDown: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ComposeDown)...),
+			key.WithHelp("S", "compose down"),
+		),
 		ComposeRestart: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.ComposeRestart)...),
-			key.WithHelp("R", "compose down/up"),
+			key.WithHelp("R", "compose restart"),
 		),
 		ComposeBuild: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.ComposeBuild)...),
-			key.WithHelp("B", "build & up"),
+			key.WithHelp("b", "build"),
+		),
+
+		// General
+		Refresh: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Refresh)...),
+			key.WithHelp("ctrl+r", "refresh"),
+		),
+		Search: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Search)...),
+			key.WithHelp("/", "search"),
+		),
+		Help: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Help)...),
+			key.WithHelp("?", "help"),
+		),
+		Config: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Config)...),
+			key.WithHelp("c", "config"),
+		),
+		SavedProjects: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.SavedProjects)...),
+			key.WithHelp("p", "projects"),
+		),
+		Quit: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Quit)...),
+			key.WithHelp("q", "quit"),
 		),
 	}
 }

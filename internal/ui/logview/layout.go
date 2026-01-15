@@ -55,7 +55,11 @@ func (l Layout) PaneWidth(screenWidth int) int {
 	if l.Cols == 0 {
 		return screenWidth
 	}
-	return screenWidth / l.Cols
+	width := screenWidth / l.Cols
+	if width < 10 {
+		width = 10 // Minimum width for usability
+	}
+	return width
 }
 
 // PaneHeight calculates the height for each pane given screen height
@@ -63,5 +67,9 @@ func (l Layout) PaneHeight(screenHeight int) int {
 	if l.Rows == 0 {
 		return screenHeight
 	}
-	return screenHeight / l.Rows
+	height := screenHeight / l.Rows
+	if height < 5 {
+		height = 5 // Minimum height for usability
+	}
+	return height
 }

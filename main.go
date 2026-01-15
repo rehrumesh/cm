@@ -8,6 +8,7 @@ import (
 
 	"cm/internal/config"
 	"cm/internal/docker"
+	"cm/internal/notify"
 	"cm/internal/ui"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -20,7 +21,59 @@ var (
 	BuildTime = "unknown"
 )
 
+func printHelp() {
+	help := `
+    ██████╗███╗   ███╗
+   ██╔════╝████╗ ████║
+   ██║     ██╔████╔██║
+   ██║     ██║╚██╔╝██║
+   ╚██████╗██║ ╚═╝ ██║
+    ╚═════╝╚═╝     ╚═╝
+
+  Container Monitor - docker logs, beautifully
+
+USAGE
+  cm [OPTIONS] [CONTAINER...]
+
+ARGUMENTS
+  CONTAINER    Container name(s) to stream logs from directly
+               (partial matches supported)
+
+OPTIONS
+  -h, --help      Show this help message
+  -v, --version   Show version information
+
+EXAMPLES
+  cm              Start interactive container selector
+  cm api          Stream logs from container matching "api"
+  cm api db       Stream logs from multiple containers
+
+KEYBINDINGS
+  j/k, ↑/↓        Navigate up/down
+  space           Select/deselect container
+  a/A             Select all / Clear selection
+  enter           Confirm and view logs
+  u/s/r           Start/stop/restart container
+  b               Build and restart (compose)
+  p               Manage saved projects
+  c               Open configuration
+  q, ctrl+c       Quit
+
+CONFIG FILES
+  ~/.cm/config.json        General settings
+  ~/.cm/keybindings.json   Key bindings
+  ~/.cm/projects.json      Saved compose projects
+`
+	fmt.Println(help)
+}
+
 func main() {
+	// Handle help flag
+	if len(os.Args) > 1 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
+		printHelp()
+		os.Exit(0)
+	}
+
 	// Handle version flag
 	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
 		fmt.Printf("cm %s (commit: %s, built: %s)\n", Version, Commit, BuildTime)
@@ -29,6 +82,10 @@ func main() {
 
 	// Ensure config file exists with defaults
 	_ = config.EnsureDefaults()
+
+	// Initialize notification system
+	notify.Initialize()
+	defer notify.Close()
 
 	// Create Docker client
 	dockerClient, err := docker.NewClient()
@@ -55,7 +112,7 @@ func main() {
 	p := tea.NewProgram(
 		app,
 		tea.WithAltScreen(),
-		tea.WithMouseAllMotion(),
+		tea.WithMouseCellMotion(), // Use cell motion instead of all motion for better terminal compatibility
 	)
 
 	if _, err := p.Run(); err != nil {

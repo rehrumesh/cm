@@ -46,21 +46,14 @@ func NewApp(dockerClient *docker.Client, initialContainers []docker.Container) A
 }
 
 // Init initializes the application
+// Note: AltScreen and Mouse are already enabled via tea.NewProgram options in main.go
 func (a App) Init() tea.Cmd {
-	cmds := []tea.Cmd{
-		tea.EnterAltScreen,
-		tea.EnableMouseAllMotion,
-	}
-
 	if a.startWithLogView {
 		// Initialize log view directly
 		a.logview = logview.New(a.selectedConts, a.dockerClient, a.width, a.height)
-		cmds = append(cmds, a.logview.Init())
-	} else {
-		cmds = append(cmds, a.discovery.Init())
+		return a.logview.Init()
 	}
-
-	return tea.Batch(cmds...)
+	return a.discovery.Init()
 }
 
 // Update handles messages

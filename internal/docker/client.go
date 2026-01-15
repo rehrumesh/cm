@@ -27,6 +27,12 @@ var (
 	configCacheLock sync.RWMutex
 	configCacheTime time.Time
 	configDirty     bool
+
+	// Projects cache to avoid loading from disk on every refresh
+	projectsCache     *config.Projects
+	projectsCacheLock sync.RWMutex
+	projectsCacheTime time.Time
+	projectsDirty     bool
 )
 
 // Client wraps the Docker SDK client
@@ -56,9 +62,10 @@ func NewClient() (*Client, error) {
 	return &Client{cli: cli}, nil
 }
 
-// Close closes the Docker client and saves any pending config changes
+// Close closes the Docker client and saves any pending config/project changes
 func (c *Client) Close() error {
 	SaveConfigIfDirty()
+	SaveProjectsIfDirty()
 	return c.cli.Close()
 }
 
@@ -71,8 +78,8 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 		return nil, fmt.Errorf("failed to list containers: %w", err)
 	}
 
-	// Load saved config (use cache to avoid disk reads on every refresh)
-	cfg := getCachedConfig()
+	// Load saved projects (cached)
+	projects := getCachedProjects()
 
 	result := make([]Container, 0, len(containers))
 	projectInfo := make(map[string]composeProjectInfo)
@@ -85,6 +92,8 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 			configFile: localComposeFile,
 			workingDir: cwd,
 		}
+		// Auto-save local compose project
+		updateProject(localProject, localComposeFile, cwd)
 	}
 
 	for _, cont := range containers {
@@ -113,13 +122,9 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 					configFile: configFile,
 					workingDir: workingDir,
 				}
+				// Auto-save detected compose projects
+				updateProject(project, configFile, workingDir)
 			}
-
-			// Update config with this project info
-			cfg.UpdateProject(project, config.ComposeProject{
-				ConfigFile: configFile,
-				WorkingDir: workingDir,
-			})
 		}
 
 		result = append(result, Container{
@@ -135,7 +140,7 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 	}
 
 	// Merge saved projects into projectInfo (for projects with no running containers)
-	for name, proj := range cfg.ComposeProjects {
+	for name, proj := range projects.SavedProjects {
 		if _, exists := projectInfo[name]; !exists {
 			projectInfo[name] = composeProjectInfo{
 				configFile: proj.ConfigFile,
@@ -143,10 +148,6 @@ func (c *Client) ListContainers(ctx context.Context) ([]Container, error) {
 			}
 		}
 	}
-
-	// Clean up stale projects and mark config for saving (deferred)
-	cfg.RemoveStaleProjects()
-	markConfigDirty()
 
 	// Find stopped services from compose projects
 	stoppedServices := c.getStoppedComposeServices(result, projectInfo)
@@ -223,7 +224,7 @@ func getCachedConfig() *config.Config {
 
 	cfg, _ := config.Load()
 	if cfg == nil {
-		cfg = &config.Config{ComposeProjects: make(map[string]config.ComposeProject)}
+		cfg = &config.Config{}
 	}
 	configCache = cfg
 	configCacheTime = time.Now()
@@ -244,6 +245,75 @@ func SaveConfigIfDirty() {
 	if configDirty && configCache != nil {
 		_ = configCache.Save()
 		configDirty = false
+	}
+}
+
+// getCachedProjects returns the cached projects or loads from disk
+func getCachedProjects() *config.Projects {
+	projectsCacheLock.RLock()
+	if projectsCache != nil && time.Since(projectsCacheTime) < cacheExpiry {
+		projectsCacheLock.RUnlock()
+		return projectsCache
+	}
+	projectsCacheLock.RUnlock()
+
+	projectsCacheLock.Lock()
+	defer projectsCacheLock.Unlock()
+
+	// Double-check after acquiring write lock
+	if projectsCache != nil && time.Since(projectsCacheTime) < cacheExpiry {
+		return projectsCache
+	}
+
+	// Save dirty projects before reloading
+	if projectsDirty && projectsCache != nil {
+		_ = projectsCache.Save()
+		projectsDirty = false
+	}
+
+	projectsCache = config.LoadProjects()
+	projectsCacheTime = time.Now()
+	return projectsCache
+}
+
+// updateProject adds or updates a project in the cache and saves immediately
+func updateProject(name string, configFile, workingDir string) {
+	if name == "" || (configFile == "" && workingDir == "") {
+		return
+	}
+
+	projectsCacheLock.Lock()
+	defer projectsCacheLock.Unlock()
+
+	if projectsCache == nil {
+		projectsCache = config.LoadProjects()
+		projectsCacheTime = time.Now()
+	}
+
+	// Check if project already exists with same info
+	if existing, ok := projectsCache.SavedProjects[name]; ok {
+		if existing.ConfigFile == configFile && existing.WorkingDir == workingDir {
+			return // No change needed
+		}
+	}
+
+	// Add or update the project
+	projectsCache.SavedProjects[name] = config.SavedProject{
+		ConfigFile: configFile,
+		WorkingDir: workingDir,
+	}
+
+	// Save immediately so it's available when modal opens
+	_ = projectsCache.Save()
+}
+
+// SaveProjectsIfDirty saves the projects if they have been modified
+func SaveProjectsIfDirty() {
+	projectsCacheLock.Lock()
+	defer projectsCacheLock.Unlock()
+	if projectsDirty && projectsCache != nil {
+		_ = projectsCache.Save()
+		projectsDirty = false
 	}
 }
 
@@ -304,10 +374,26 @@ func getComposeServices(project, configFile, workingDir string) []string {
 	return services
 }
 
+// StopContainer stops a container gracefully
+func (c *Client) StopContainer(ctx context.Context, containerID string) error {
+	timeout := 10 // seconds
+	return c.cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
+}
+
+// KillContainer forcefully kills a container
+func (c *Client) KillContainer(ctx context.Context, containerID string) error {
+	return c.cli.ContainerKill(ctx, containerID, "SIGKILL")
+}
+
 // RestartContainer restarts a container
 func (c *Client) RestartContainer(ctx context.Context, containerID string) error {
 	timeout := 10 // seconds
 	return c.cli.ContainerRestart(ctx, containerID, container.StopOptions{Timeout: &timeout})
+}
+
+// StartContainer starts a stopped container
+func (c *Client) StartContainer(ctx context.Context, containerID string) error {
+	return c.cli.ContainerStart(ctx, containerID, container.StartOptions{})
 }
 
 // ComposeUp runs docker compose up -d for a specific service
@@ -316,14 +402,12 @@ func (c *Client) ComposeUp(ctx context.Context, cont Container) error {
 		return fmt.Errorf("container is not part of a compose project")
 	}
 
-	// Get compose file info from config or use defaults
-	cfg, _ := config.Load()
+	// Get compose file info from projects (cached)
+	projects := getCachedProjects()
 	var configFile, workingDir string
-	if cfg != nil {
-		if proj, ok := cfg.ComposeProjects[cont.ComposeProject]; ok {
-			configFile = proj.ConfigFile
-			workingDir = proj.WorkingDir
-		}
+	if proj, ok := projects.SavedProjects[cont.ComposeProject]; ok {
+		configFile = proj.ConfigFile
+		workingDir = proj.WorkingDir
 	}
 
 	// Build compose args
@@ -347,23 +431,51 @@ func (c *Client) ComposeUp(ctx context.Context, cont Container) error {
 	return upCmd.Run()
 }
 
+// ComposeDown runs docker compose down for a specific service (stop only)
+func (c *Client) ComposeDown(ctx context.Context, cont Container) error {
+	if cont.ComposeProject == "" || cont.ComposeService == "" {
+		return fmt.Errorf("container is not part of a compose project")
+	}
+
+	projects := getCachedProjects()
+	var configFile, workingDir string
+	if proj, ok := projects.SavedProjects[cont.ComposeProject]; ok {
+		configFile = proj.ConfigFile
+		workingDir = proj.WorkingDir
+	}
+
+	var baseArgs []string
+	if configFile != "" {
+		for _, f := range strings.Split(configFile, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" {
+				baseArgs = append(baseArgs, "-f", f)
+			}
+		}
+	}
+	baseArgs = append(baseArgs, "-p", cont.ComposeProject)
+
+	downArgs := append(baseArgs, "down", cont.ComposeService)
+	downCmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, downArgs...)...)
+	if workingDir != "" {
+		downCmd.Dir = workingDir
+	}
+	return downCmd.Run()
+}
+
 // ComposeDownUp runs docker compose down then up for a specific service
 func (c *Client) ComposeDownUp(ctx context.Context, cont Container) error {
 	if cont.ComposeProject == "" || cont.ComposeService == "" {
 		return fmt.Errorf("container is not part of a compose project")
 	}
 
-	// Get compose file info from config or use defaults
-	cfg, _ := config.Load()
+	projects := getCachedProjects()
 	var configFile, workingDir string
-	if cfg != nil {
-		if proj, ok := cfg.ComposeProjects[cont.ComposeProject]; ok {
-			configFile = proj.ConfigFile
-			workingDir = proj.WorkingDir
-		}
+	if proj, ok := projects.SavedProjects[cont.ComposeProject]; ok {
+		configFile = proj.ConfigFile
+		workingDir = proj.WorkingDir
 	}
 
-	// Build compose args
 	var baseArgs []string
 	if configFile != "" {
 		for _, f := range strings.Split(configFile, ",") {
@@ -381,7 +493,6 @@ func (c *Client) ComposeDownUp(ctx context.Context, cont Container) error {
 	if workingDir != "" {
 		downCmd.Dir = workingDir
 	}
-	// Ignore down errors - service might not be running
 	_ = downCmd.Run()
 
 	// Run compose up for the service
@@ -399,14 +510,12 @@ func (c *Client) ComposeBuildUp(ctx context.Context, cont Container) error {
 		return fmt.Errorf("container is not part of a compose project")
 	}
 
-	// Get compose file info from config or use defaults
-	cfg, _ := config.Load()
+	// Get compose file info from projects (cached)
+	projects := getCachedProjects()
 	var configFile, workingDir string
-	if cfg != nil {
-		if proj, ok := cfg.ComposeProjects[cont.ComposeProject]; ok {
-			configFile = proj.ConfigFile
-			workingDir = proj.WorkingDir
-		}
+	if proj, ok := projects.SavedProjects[cont.ComposeProject]; ok {
+		configFile = proj.ConfigFile
+		workingDir = proj.WorkingDir
 	}
 
 	// Build compose args
