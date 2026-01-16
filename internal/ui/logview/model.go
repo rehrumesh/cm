@@ -261,6 +261,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, m.keys.Back):
+			// If a pane is maximized, un-maximize it first
+			if m.maximizedPane != -1 {
+				m.maximizedPane = -1
+				m.recalculateLayout()
+				return m, nil
+			}
+			// Otherwise go back to discovery
 			m.cancel()
 			return m, func() tea.Msg { return BackToDiscoveryMsg{} }
 
@@ -283,12 +290,26 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 			m.recalculateLayout()
 
-		// Arrow keys for grid navigation
+		// Arrow keys: scroll when maximized, navigate when tiled
 		case key.Matches(msg, m.keys.Up):
-			m.focusUp()
+			if m.maximizedPane != -1 {
+				// Scroll up when maximized
+				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+					m.panes[m.maximizedPane].Viewport.SetYOffset(m.panes[m.maximizedPane].Viewport.YOffset - 1)
+				}
+			} else {
+				m.focusUp()
+			}
 
 		case key.Matches(msg, m.keys.Down):
-			m.focusDown()
+			if m.maximizedPane != -1 {
+				// Scroll down when maximized
+				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+					m.panes[m.maximizedPane].Viewport.SetYOffset(m.panes[m.maximizedPane].Viewport.YOffset + 1)
+				}
+			} else {
+				m.focusDown()
+			}
 
 		case key.Matches(msg, m.keys.Left):
 			m.focusLeft()
@@ -296,15 +317,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Right):
 			m.focusRight()
 
-		// j/k for scrolling focused pane
+		// ctrl+u/d for scrolling focused pane (faster scroll)
 		case key.Matches(msg, m.keys.ScrollUp):
-			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
-				m.panes[m.focusedPane].Viewport.SetYOffset(m.panes[m.focusedPane].Viewport.YOffset - 3)
+			paneIdx := m.focusedPane
+			if m.maximizedPane != -1 {
+				paneIdx = m.maximizedPane
+			}
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				m.panes[paneIdx].Viewport.SetYOffset(m.panes[paneIdx].Viewport.YOffset - 3)
 			}
 
 		case key.Matches(msg, m.keys.ScrollDown):
-			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
-				m.panes[m.focusedPane].Viewport.SetYOffset(m.panes[m.focusedPane].Viewport.YOffset + 3)
+			paneIdx := m.focusedPane
+			if m.maximizedPane != -1 {
+				paneIdx = m.maximizedPane
+			}
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				m.panes[paneIdx].Viewport.SetYOffset(m.panes[paneIdx].Viewport.YOffset + 3)
 			}
 
 		// Container actions
@@ -832,15 +861,28 @@ func (m Model) renderHelpBar() string {
 	key := common.HelpKeyStyle.Render
 	desc := common.HelpDescStyle.Render
 
-	help := " " + key("r") + desc(":restart") +
-		desc("  ") + key("R") + desc(":down/up") +
-		desc("  ") + key("b") + desc(":build") +
-		desc("  ") + key("←↑↓→") + desc(":nav") +
-		desc("  ") + key("ctrl+u/d") + desc(":scroll") +
-		desc("  ") + key("enter") + desc(":max") +
-		desc("  ") + key("c") + desc(":config") +
-		desc("  ") + key("esc") + desc(":back") +
-		desc("  ") + key("q") + desc(":quit")
+	var help string
+	if m.maximizedPane != -1 {
+		// Maximized pane view
+		help = " " + key("r") + desc(":restart") +
+			desc("  ") + key("R") + desc(":down/up") +
+			desc("  ") + key("b") + desc(":build") +
+			desc("  ") + key("↑↓") + desc(":scroll") +
+			desc("  ") + key("enter") + desc("/") + key("esc") + desc(":min") +
+			desc("  ") + key("c") + desc(":config") +
+			desc("  ") + key("q") + desc(":quit")
+	} else {
+		// Tiled panes view
+		help = " " + key("r") + desc(":restart") +
+			desc("  ") + key("R") + desc(":down/up") +
+			desc("  ") + key("b") + desc(":build") +
+			desc("  ") + key("←↑↓→") + desc(":nav") +
+			desc("  ") + key("ctrl+u/d") + desc(":scroll") +
+			desc("  ") + key("enter") + desc(":max") +
+			desc("  ") + key("c") + desc(":config") +
+			desc("  ") + key("esc") + desc(":back") +
+			desc("  ") + key("q") + desc(":quit")
+	}
 
 	return common.HelpBarStyle.Width(m.width).Render(help)
 }

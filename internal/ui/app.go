@@ -81,6 +81,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.logview.Cleanup()
 		a.screen = ScreenDiscovery
 		a.discovery = discovery.New(a.dockerClient, a.selectedConts)
+		// Forward current window size to the new discovery model
+		a.discovery, _ = a.discovery.Update(tea.WindowSizeMsg{Width: a.width, Height: a.height})
 		return a, a.discovery.Init()
 	}
 
