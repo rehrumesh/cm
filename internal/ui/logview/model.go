@@ -3,11 +3,14 @@ package logview
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"cm/internal/debug"
 	"cm/internal/docker"
 	"cm/internal/ui/common"
 
+	"github.com/atotto/clipboard"
 	"github.com/charmbracelet/bubbles/key"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -77,6 +80,12 @@ type Model struct {
 
 	// Toast notifications
 	toast common.Toast
+
+	// Text selection for copy
+	selection Selection
+
+	// Word wrap toggle
+	wordWrap bool
 }
 
 // New creates a new log view model
@@ -98,6 +107,7 @@ func New(containers []docker.Container, dockerClient *docker.Client, width, heig
 		lastHeight:    height,
 		configModal:   common.NewConfigModal(),
 		toast:         common.NewToast(),
+		selection:     NewSelection(),
 	}
 
 	// Calculate layout
@@ -229,6 +239,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case LogLineMsg:
 		for i := range m.panes {
 			if m.panes[i].ID == msg.ContainerID {
+				debug.Log("LogLine received: container=%s stream=%s len=%d", msg.ContainerID[:12], msg.Line.Stream, len(msg.Line.Content))
 				m.panes[i].AddLogLine(msg.Line)
 				// Continue listening on the SAME channel
 				if stream, ok := m.streams[msg.ContainerID]; ok {
@@ -312,10 +323,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, m.keys.Left):
-			m.focusLeft()
+			if m.maximizedPane != -1 {
+				// Scroll left when maximized (horizontal scroll)
+				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+					m.panes[m.maximizedPane].ScrollLeft(10)
+				}
+			} else {
+				m.focusLeft()
+			}
 
 		case key.Matches(msg, m.keys.Right):
-			m.focusRight()
+			if m.maximizedPane != -1 {
+				// Scroll right when maximized (horizontal scroll)
+				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+					m.panes[m.maximizedPane].ScrollRight(10)
+				}
+			} else {
+				m.focusRight()
+			}
 
 		// ctrl+u/d for scrolling focused pane (faster scroll)
 		case key.Matches(msg, m.keys.ScrollUp):
@@ -340,6 +365,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Restart):
 			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
 				pane := &m.panes[m.focusedPane]
+				debug.Log("Restart requested for container: %s", pane.Container.DisplayName())
 				pane.AddLogLine(docker.LogLine{
 					ContainerID: pane.ID,
 					Timestamp:   time.Now(),
@@ -375,6 +401,44 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Config):
 			return m, m.configModal.Open()
+
+		case key.Matches(msg, m.keys.CopyLogs):
+			// Copy all logs from focused pane to clipboard
+			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
+				pane := &m.panes[m.focusedPane]
+				text := pane.GetPlainTextLogs()
+				if text != "" {
+					if err := clipboard.WriteAll(text); err == nil {
+						lineCount := len(pane.LogLines)
+						debug.Log("Copied %d lines (%d chars) from %s", lineCount, len(text), pane.Container.DisplayName())
+						cmds = append(cmds, m.toast.Show("Copied", fmt.Sprintf("%d lines", lineCount), common.ToastSuccess))
+					}
+				}
+			}
+
+		case key.Matches(msg, m.keys.WordWrap):
+			// Toggle word wrap
+			m.wordWrap = !m.wordWrap
+			debug.Log("Word wrap toggled: %v", m.wordWrap)
+			// Re-render all panes with new wrap setting
+			for i := range m.panes {
+				m.panes[i].SetWordWrap(m.wordWrap)
+			}
+			status := "off"
+			if m.wordWrap {
+				status = "on"
+			}
+			cmds = append(cmds, m.toast.Show("Word Wrap", status, common.ToastSuccess))
+
+		case key.Matches(msg, m.keys.DebugToggle):
+			// Toggle debug logging
+			enabled := debug.Toggle()
+			status := "off"
+			if enabled {
+				status = "on"
+				debug.Log("Debug toggled on from logview")
+			}
+			cmds = append(cmds, m.toast.Show("Debug Log", status, common.ToastSuccess))
 		}
 
 	case ContainerActionMsg:
@@ -446,6 +510,48 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
+// getPanePosition returns the top-left corner coordinates of a pane by its index
+func (m *Model) getPanePosition(paneIdx int) (x, y int) {
+	// If maximized, pane is at 0,0
+	if m.maximizedPane >= 0 {
+		return 0, 0
+	}
+
+	// Find the pane's row and column
+	row, col := m.getPaneGridPosition(paneIdx)
+
+	// Reserve 1 line for help bar
+	availableHeight := m.height - 1
+
+	// Calculate position based on grid
+	baseWidth := m.width / m.layout.Cols
+	extraWidth := m.width % m.layout.Cols
+	baseHeight := availableHeight / m.layout.Rows
+	extraHeight := availableHeight % m.layout.Rows
+
+	// Sum up widths of columns before this one
+	x = 0
+	for c := 0; c < col; c++ {
+		w := baseWidth
+		if c < extraWidth {
+			w++
+		}
+		x += w
+	}
+
+	// Sum up heights of rows before this one
+	y = 0
+	for r := 0; r < row; r++ {
+		h := baseHeight
+		if r < extraHeight {
+			h++
+		}
+		y += h
+	}
+
+	return x, y
+}
+
 // getPaneAtPosition returns the pane index at the given mouse position, or -1 if none
 func (m *Model) getPaneAtPosition(x, y int) int {
 	// If maximized, the maximized pane covers the whole screen
@@ -506,8 +612,8 @@ func (m *Model) getPaneAtPosition(x, y int) int {
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
-	// Handle mouse wheel scrolling
-	if msg.Action == tea.MouseActionPress {
+	switch msg.Action {
+	case tea.MouseActionPress:
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
 			// Find which pane the mouse is over using grid position
@@ -525,6 +631,43 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		case tea.MouseButtonLeft:
 			return m.handleMouseClick(msg)
 		}
+
+	case tea.MouseActionMotion:
+		// Update selection if one is active
+		if m.selection.Active {
+			m.selection.Update(msg.X, msg.Y)
+			// Update visual selection in the pane with character-level precision
+			paneIdx := m.selection.PaneIdx
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				startLine, startCol, endLine, endCol := m.selection.GetNormalizedRange()
+				m.panes[paneIdx].UpdateSelectionChar(startLine, startCol, endLine, endCol)
+			}
+		}
+
+	case tea.MouseActionRelease:
+		// Finalize selection and copy to clipboard
+		if m.selection.Active && m.selection.HasSelection() {
+			paneIdx := m.selection.PaneIdx
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				pane := &m.panes[paneIdx]
+				startLine, startCol, endLine, endCol := m.selection.GetNormalizedRange()
+				text := pane.GetTextInRangeChar(startLine, startCol, endLine, endCol)
+				// Clear selection highlighting
+				pane.ClearSelection()
+				if text != "" {
+					clipboard.WriteAll(text)
+					// Count characters or lines for toast message
+					charCount := len([]rune(text))
+					m.selection.Clear()
+					return m.toast.Show("Copied", fmt.Sprintf("%d chars", charCount), common.ToastSuccess)
+				}
+			}
+		}
+		// Clear selection highlighting if there was an active selection
+		if m.selection.Active && m.selection.PaneIdx >= 0 && m.selection.PaneIdx < len(m.panes) {
+			m.panes[m.selection.PaneIdx].ClearSelection()
+		}
+		m.selection.Clear()
 	}
 	return nil
 }
@@ -553,10 +696,14 @@ func (m *Model) handleMouseClick(msg tea.MouseMsg) tea.Cmd {
 		return nil
 	}
 
-	// Single click - focus pane
+	// Single click - focus pane and start selection for potential drag
 	m.setFocus(paneIdx)
 	m.lastClickTime = now
 	m.lastClickPaneID = pane.ID
+
+	// Start selection for potential drag
+	paneX, paneY := m.getPanePosition(paneIdx)
+	m.selection.Start(msg.X, msg.Y, paneIdx, paneX, paneY)
 
 	return nil
 }
@@ -772,18 +919,119 @@ func (m Model) View() (result string) {
 		) + "\n" + modalView
 	}
 
-	// Add toast notification if visible
+	// Overlay toast notification if visible
 	if m.toast.IsVisible() {
-		toastContent := m.toast.RenderInline()
-		// Right-align toast
-		toastLine := lipgloss.NewStyle().
-			Width(m.width).
-			Align(lipgloss.Right).
-			Render(toastContent)
-		content = content + "\n" + toastLine
+		content = m.overlayToast(content)
 	}
 
 	return content
+}
+
+// overlayToast composites the toast on top of the content
+func (m Model) overlayToast(content string) string {
+	toastContent := m.toast.RenderInline()
+	if toastContent == "" {
+		return content
+	}
+
+	toastWidth := lipgloss.Width(toastContent)
+	toastHeight := lipgloss.Height(toastContent)
+
+	// Position toast at bottom-right, above the help bar
+	// Leave 1 line for help bar, 1 line padding from bottom
+	toastX := m.width - toastWidth - 2
+	toastY := m.height - toastHeight - 2
+
+	if toastX < 0 {
+		toastX = 0
+	}
+	if toastY < 0 {
+		toastY = 0
+	}
+
+	// Split content and toast into lines
+	contentLines := strings.Split(content, "\n")
+	toastLines := strings.Split(toastContent, "\n")
+
+	// Ensure content has enough lines
+	for len(contentLines) < m.height {
+		contentLines = append(contentLines, "")
+	}
+
+	// Overlay toast onto content
+	for i, toastLine := range toastLines {
+		targetY := toastY + i
+		if targetY < 0 || targetY >= len(contentLines) {
+			continue
+		}
+
+		// Use ANSI-aware truncation and padding
+		contentLine := contentLines[targetY]
+		contentLineWidth := lipgloss.Width(contentLine)
+
+		// Build the new line: content up to toastX, then toast
+		if contentLineWidth <= toastX {
+			// Content is shorter than toast position, pad with spaces
+			padding := strings.Repeat(" ", toastX-contentLineWidth)
+			contentLines[targetY] = contentLine + padding + toastLine
+		} else {
+			// Need to truncate content - use ansi-aware truncation
+			contentLines[targetY] = truncateWithAnsi(contentLine, toastX) + toastLine
+		}
+	}
+
+	return strings.Join(contentLines, "\n")
+}
+
+// truncateWithAnsi truncates a string to a visual width, preserving ANSI codes
+func truncateWithAnsi(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	var result strings.Builder
+	visualWidth := 0
+	inEscape := false
+	escapeSeq := strings.Builder{}
+
+	for _, r := range s {
+		if inEscape {
+			escapeSeq.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				// End of escape sequence
+				result.WriteString(escapeSeq.String())
+				escapeSeq.Reset()
+				inEscape = false
+			}
+			continue
+		}
+
+		if r == '\x1b' {
+			inEscape = true
+			escapeSeq.WriteRune(r)
+			continue
+		}
+
+		// Regular character
+		if visualWidth >= width {
+			break
+		}
+		result.WriteRune(r)
+		visualWidth++
+	}
+
+	// Add any pending escape sequence
+	if escapeSeq.Len() > 0 {
+		result.WriteString(escapeSeq.String())
+	}
+
+	// Pad to exact width if needed
+	for visualWidth < width {
+		result.WriteRune(' ')
+		visualWidth++
+	}
+
+	return result.String()
 }
 
 func (m Model) renderTiledView() string {
@@ -867,9 +1115,12 @@ func (m Model) renderHelpBar() string {
 		help = " " + key("r") + desc(":restart") +
 			desc("  ") + key("R") + desc(":down/up") +
 			desc("  ") + key("b") + desc(":build") +
-			desc("  ") + key("↑↓") + desc(":scroll") +
-			desc("  ") + key("enter") + desc("/") + key("esc") + desc(":min") +
+			desc("  ") + key("↑↓←→") + desc(":scroll") +
+			desc("  ") + key("y") + desc(":copy") +
+			desc("  ") + key("w") + desc(":wrap") +
 			desc("  ") + key("c") + desc(":config") +
+			desc("  ") + key("ctrl+g") + desc(":debug logs") +
+			desc("  ") + key("esc") + desc(":min") +
 			desc("  ") + key("q") + desc(":quit")
 	} else {
 		// Tiled panes view
@@ -877,9 +1128,10 @@ func (m Model) renderHelpBar() string {
 			desc("  ") + key("R") + desc(":down/up") +
 			desc("  ") + key("b") + desc(":build") +
 			desc("  ") + key("←↑↓→") + desc(":nav") +
-			desc("  ") + key("ctrl+u/d") + desc(":scroll") +
-			desc("  ") + key("enter") + desc(":max") +
+			desc("  ") + key("y") + desc(":copy") +
+			desc("  ") + key("w") + desc(":wrap") +
 			desc("  ") + key("c") + desc(":config") +
+			desc("  ") + key("ctrl+g") + desc(":debug logs") +
 			desc("  ") + key("esc") + desc(":back") +
 			desc("  ") + key("q") + desc(":quit")
 	}

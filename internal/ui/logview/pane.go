@@ -5,11 +5,13 @@ import (
 	"regexp"
 	"strings"
 
+	"cm/internal/debug"
 	"cm/internal/docker"
 	"cm/internal/ui/common"
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/reflow/wrap"
 )
 
 // Regex patterns for terminal control sequences to strip
@@ -115,6 +117,10 @@ type Pane struct {
 	// Cached dimensions to avoid re-renders
 	lastWidth  int
 	lastHeight int
+	// Word wrap setting
+	wordWrap bool
+	// Horizontal scroll offset (for non-wrapped mode)
+	xOffset int
 }
 
 // NewPane creates a new log pane for a container
@@ -186,11 +192,114 @@ func (p *Pane) SetSize(width, height int) {
 	p.Viewport.SetContent(p.renderLogs())
 }
 
+// SetWordWrap enables or disables word wrapping and re-renders
+func (p *Pane) SetWordWrap(enabled bool) {
+	p.wordWrap = enabled
+	p.xOffset = 0 // Reset horizontal scroll when toggling wrap
+	p.Viewport.SetContent(p.renderLogs())
+}
+
+// ScrollLeft scrolls the viewport left (for non-wrapped mode)
+func (p *Pane) ScrollLeft(amount int) {
+	if p.wordWrap {
+		return
+	}
+	p.xOffset -= amount
+	if p.xOffset < 0 {
+		p.xOffset = 0
+	}
+	p.Viewport.SetContent(p.renderLogs())
+}
+
+// ScrollRight scrolls the viewport right (for non-wrapped mode)
+func (p *Pane) ScrollRight(amount int) {
+	if p.wordWrap {
+		return
+	}
+	p.xOffset += amount
+	// Cap at reasonable max (will be adjusted in render if needed)
+	if p.xOffset > 1000 {
+		p.xOffset = 1000
+	}
+	p.Viewport.SetContent(p.renderLogs())
+}
+
+// GetScrollInfo returns scroll position info for scroll bar rendering
+func (p *Pane) GetScrollInfo() (yOffset, totalLines, visibleLines int) {
+	return p.Viewport.YOffset, p.Viewport.TotalLineCount(), p.Viewport.Height
+}
+
+// UpdateSelectionChar re-renders the pane with character-level selection highlighting
+func (p *Pane) UpdateSelectionChar(startLine, startCol, endLine, endCol int) {
+	debug.Log("Pane.UpdateSelectionChar: (%d,%d) to (%d,%d)", startLine, startCol, endLine, endCol)
+	p.Viewport.SetContent(p.renderLogsWithCharSelection(startLine, startCol, endLine, endCol))
+}
+
+// ClearSelection clears selection highlighting
+func (p *Pane) ClearSelection() {
+	p.Viewport.SetContent(p.renderLogs())
+}
+
 // ANSI reset sequence to prevent color bleeding
 const ansiReset = "\x1b[0m"
 
+// renderScrollBar renders a vertical scroll bar
+func (p *Pane) renderScrollBar(height, totalLines, offset int) string {
+	if height <= 0 || totalLines <= 0 {
+		return ""
+	}
+
+	// Calculate thumb size and position
+	thumbSize := height * height / totalLines
+	if thumbSize < 1 {
+		thumbSize = 1
+	}
+	if thumbSize > height {
+		thumbSize = height
+	}
+
+	// Calculate thumb position
+	scrollableLines := totalLines - height
+	if scrollableLines <= 0 {
+		scrollableLines = 1
+	}
+	thumbPos := offset * (height - thumbSize) / scrollableLines
+	if thumbPos < 0 {
+		thumbPos = 0
+	}
+	if thumbPos > height-thumbSize {
+		thumbPos = height - thumbSize
+	}
+
+	// Build scroll bar
+	var sb strings.Builder
+	trackChar := "│"
+	thumbChar := "┃"
+
+	trackStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("238"))
+	thumbStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+
+	for i := 0; i < height; i++ {
+		if i >= thumbPos && i < thumbPos+thumbSize {
+			sb.WriteString(thumbStyle.Render(thumbChar))
+		} else {
+			sb.WriteString(trackStyle.Render(trackChar))
+		}
+		if i < height-1 {
+			sb.WriteString("\n")
+		}
+	}
+
+	return sb.String()
+}
+
 // renderLogs renders all log lines as a string
 func (p *Pane) renderLogs() (result string) {
+	return p.renderLogsWithSelection(-1, -1)
+}
+
+// renderLogsWithSelection renders log lines with optional selection highlighting
+func (p *Pane) renderLogsWithSelection(selStartLine, selEndLine int) (result string) {
 	// Recover from any panics during rendering
 	defer func() {
 		if r := recover(); r != nil {
@@ -202,34 +311,414 @@ func (p *Pane) renderLogs() (result string) {
 		return common.SubtitleStyle.Render("Waiting for logs...")
 	}
 
-	var b strings.Builder
-	for _, line := range p.LogLines {
-		// Format timestamp
-		ts := common.TimestampStyle.Render(line.Timestamp.Format("15:04:05"))
+	// Timestamp takes 8 chars (HH:MM:SS) + 1 space
+	const timestampWidth = 9
+	// Reserve 1 extra char for scroll bar (shown when content exceeds viewport)
+	contentWidth := p.Viewport.Width - timestampWidth - 1
+	if contentWidth < 10 {
+		contentWidth = 10
+	}
 
-		// Content is already sanitized when added via AddLogLine
-		// Preserve original colors from the log output for syntax highlighting
-		var content string
-		switch line.Stream {
-		case "stderr":
-			// Only apply our style if content has no colors (simple heuristic)
-			if !strings.Contains(line.Content, "\x1b[") {
-				content = common.StderrStyle.Render(line.Content)
-			} else {
-				content = line.Content
+	// Selection style (inverted colors)
+	selStyle := lipgloss.NewStyle().Reverse(true)
+
+	var b strings.Builder
+	displayLine := 0 // Track display line for selection highlighting
+
+	for _, line := range p.LogLines {
+		// Get plain content
+		plainContent := stripANSI(line.Content)
+
+		// Determine styling based on stream type
+		applyStyle := func(text string) string {
+			switch line.Stream {
+			case "stderr":
+				if !strings.Contains(line.Content, "\x1b[") {
+					return common.StderrStyle.Render(text)
+				}
+				return text
+			case "system":
+				return common.SubtitleStyle.Render(text)
+			default:
+				return text
 			}
-		case "system":
-			content = common.SubtitleStyle.Render(line.Content)
-		default:
-			// Keep original colors for stdout
-			content = line.Content
 		}
 
-		// Add ANSI reset after each line to prevent color bleeding into borders
-		b.WriteString(fmt.Sprintf("%s %s%s\n", ts, content, ansiReset))
+		if p.wordWrap {
+			// Word wrap mode: hard wrap content to fit width (breaks long words)
+			wrapped := wrap.String(plainContent, contentWidth)
+			wrappedLines := strings.Split(wrapped, "\n")
+
+			for i, wline := range wrappedLines {
+				isSelected := selStartLine >= 0 && displayLine >= selStartLine && displayLine <= selEndLine
+
+				var ts string
+				if i == 0 {
+					ts = common.TimestampStyle.Render(line.Timestamp.Format("15:04:05"))
+					if isSelected {
+						ts = selStyle.Render(line.Timestamp.Format("15:04:05"))
+					}
+				} else {
+					ts = strings.Repeat(" ", 8) // Indent continuation lines
+				}
+
+				styledLine := applyStyle(wline)
+				if isSelected {
+					styledLine = selStyle.Render(wline)
+				}
+
+				b.WriteString(fmt.Sprintf("%s %s%s\n", ts, styledLine, ansiReset))
+				displayLine++
+			}
+		} else {
+			// Non-wrap mode: apply horizontal scroll offset
+			isSelected := selStartLine >= 0 && displayLine >= selStartLine && displayLine <= selEndLine
+
+			ts := common.TimestampStyle.Render(line.Timestamp.Format("15:04:05"))
+			if isSelected {
+				ts = selStyle.Render(line.Timestamp.Format("15:04:05"))
+			}
+
+			// Apply horizontal scroll offset
+			displayContent := plainContent
+			if p.xOffset > 0 {
+				runes := []rune(plainContent)
+				if p.xOffset < len(runes) {
+					displayContent = string(runes[p.xOffset:])
+				} else {
+					displayContent = ""
+				}
+			}
+
+			content := applyStyle(displayContent)
+			if isSelected {
+				content = selStyle.Render(displayContent)
+			}
+
+			// If original had ANSI codes and not selected and no offset, use original
+			if !isSelected && p.xOffset == 0 && strings.Contains(line.Content, "\x1b[") && line.Stream == "stdout" {
+				content = line.Content
+			}
+
+			b.WriteString(fmt.Sprintf("%s %s%s\n", ts, content, ansiReset))
+			displayLine++
+		}
 	}
 
 	return b.String()
+}
+
+// renderLogsWithCharSelection renders log lines with character-level selection highlighting
+func (p *Pane) renderLogsWithCharSelection(selStartLine, selStartCol, selEndLine, selEndCol int) (result string) {
+	// Recover from any panics during rendering
+	defer func() {
+		if r := recover(); r != nil {
+			result = common.StderrStyle.Render(fmt.Sprintf("Render error: %v", r))
+		}
+	}()
+
+	if len(p.LogLines) == 0 {
+		return common.SubtitleStyle.Render("Waiting for logs...")
+	}
+
+	// Timestamp takes 8 chars (HH:MM:SS) + 1 space
+	const timestampWidth = 9
+	contentWidth := p.Viewport.Width - timestampWidth - 1
+	if contentWidth < 10 {
+		contentWidth = 10
+	}
+
+	// Selection style (inverted colors)
+	selStyle := lipgloss.NewStyle().Reverse(true)
+
+	var b strings.Builder
+	displayLine := 0
+
+	for _, line := range p.LogLines {
+		plainContent := stripANSI(line.Content)
+		tsPlain := line.Timestamp.Format("15:04:05")
+
+		if p.wordWrap {
+			wrapped := wrap.String(plainContent, contentWidth)
+			wrappedLines := strings.Split(wrapped, "\n")
+
+			for i, wline := range wrappedLines {
+				var tsDisplay string
+				if i == 0 {
+					tsDisplay = tsPlain
+				} else {
+					tsDisplay = strings.Repeat(" ", 8)
+				}
+
+				// Build plain line for selection calculation
+				plainLine := tsDisplay + " " + wline
+
+				// Apply character-level selection and render
+				renderedLine := p.applyCharSelectionPlain(plainLine, displayLine, selStartLine, selStartCol, selEndLine, selEndCol, selStyle, i == 0)
+				b.WriteString(renderedLine + ansiReset + "\n")
+				displayLine++
+			}
+		} else {
+			displayContent := plainContent
+			if p.xOffset > 0 {
+				runes := []rune(plainContent)
+				if p.xOffset < len(runes) {
+					displayContent = string(runes[p.xOffset:])
+				} else {
+					displayContent = ""
+				}
+			}
+
+			// Build plain line for selection calculation
+			plainLine := tsPlain + " " + displayContent
+
+			// Apply character-level selection and render
+			renderedLine := p.applyCharSelectionPlain(plainLine, displayLine, selStartLine, selStartCol, selEndLine, selEndCol, selStyle, true)
+			b.WriteString(renderedLine + ansiReset + "\n")
+			displayLine++
+		}
+	}
+
+	return b.String()
+}
+
+// applyCharSelectionPlain applies character-level selection to a plain text line
+// and returns the line with proper styling (timestamp style + selection highlighting)
+func (p *Pane) applyCharSelectionPlain(plainLine string, lineNum, selStartLine, selStartCol, selEndLine, selEndCol int, selStyle lipgloss.Style, hasTimestamp bool) string {
+	runes := []rune(plainLine)
+	lineLen := len(runes)
+
+	// Check if this line is in the selection range
+	if lineNum < selStartLine || lineNum > selEndLine {
+		// No selection - apply normal styling
+		if hasTimestamp && lineLen >= 9 {
+			// Style timestamp (first 8 chars) + space + content
+			ts := common.TimestampStyle.Render(string(runes[:8]))
+			return ts + string(runes[8:])
+		}
+		return plainLine
+	}
+
+	debug.Log("applyCharSelectionPlain: lineNum=%d lineLen=%d sel=(%d,%d)-(%d,%d)", lineNum, lineLen, selStartLine, selStartCol, selEndLine, selEndCol)
+
+	// Determine selection bounds for this specific line
+	var startCol, endCol int
+	if lineNum == selStartLine && lineNum == selEndLine {
+		// Single line selection
+		startCol = selStartCol
+		endCol = selEndCol
+	} else if lineNum == selStartLine {
+		// First line of multi-line selection
+		startCol = selStartCol
+		endCol = lineLen
+	} else if lineNum == selEndLine {
+		// Last line of multi-line selection
+		startCol = 0
+		endCol = selEndCol
+	} else {
+		// Middle line - select entire line
+		startCol = 0
+		endCol = lineLen
+	}
+
+	// Clamp bounds
+	if startCol < 0 {
+		startCol = 0
+	}
+	if endCol > lineLen {
+		endCol = lineLen
+	}
+	debug.Log("applyCharSelectionPlain: after clamp startCol=%d endCol=%d", startCol, endCol)
+
+	if startCol >= endCol {
+		// No actual selection on this line - apply normal styling
+		if hasTimestamp && lineLen >= 9 {
+			ts := common.TimestampStyle.Render(string(runes[:8]))
+			return ts + string(runes[8:])
+		}
+		return plainLine
+	}
+
+	// Build the line with selection highlighting
+	// We need to handle the timestamp specially (first 8 chars + space)
+	var result strings.Builder
+
+	for i := 0; i < lineLen; i++ {
+		inSelection := i >= startCol && i < endCol
+
+		if inSelection {
+			result.WriteString(selStyle.Render(string(runes[i])))
+		} else if hasTimestamp && i < 8 {
+			// Timestamp character (not selected)
+			result.WriteString(common.TimestampStyle.Render(string(runes[i])))
+		} else {
+			result.WriteRune(runes[i])
+		}
+	}
+
+	return result.String()
+}
+
+// stripANSI removes all ANSI escape sequences from a string
+var ansiRe = regexp.MustCompile(`\x1b\[[0-9;]*m`)
+
+func stripANSI(s string) string {
+	return ansiRe.ReplaceAllString(s, "")
+}
+
+// GetPlainTextLogs returns all log lines as plain text (no ANSI codes)
+func (p *Pane) GetPlainTextLogs() string {
+	if len(p.LogLines) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	for _, line := range p.LogLines {
+		ts := line.Timestamp.Format("15:04:05")
+		content := stripANSI(line.Content)
+		b.WriteString(fmt.Sprintf("%s %s\n", ts, content))
+	}
+	return b.String()
+}
+
+// GetTextInRange returns log lines in a given line range (0-indexed, relative to viewport)
+func (p *Pane) GetTextInRange(startLine, endLine int) string {
+	if len(p.LogLines) == 0 {
+		return ""
+	}
+
+	// Adjust for viewport scroll offset
+	offset := p.Viewport.YOffset
+	actualStart := offset + startLine
+	actualEnd := offset + endLine
+
+	// Clamp to valid range
+	if actualStart < 0 {
+		actualStart = 0
+	}
+	if actualEnd >= len(p.LogLines) {
+		actualEnd = len(p.LogLines) - 1
+	}
+	if actualStart > actualEnd || actualStart >= len(p.LogLines) {
+		return ""
+	}
+
+	var b strings.Builder
+	for i := actualStart; i <= actualEnd; i++ {
+		line := p.LogLines[i]
+		ts := line.Timestamp.Format("15:04:05")
+		content := stripANSI(line.Content)
+		b.WriteString(fmt.Sprintf("%s %s\n", ts, content))
+	}
+	return strings.TrimSuffix(b.String(), "\n")
+}
+
+// GetTextInRangeChar returns selected text with character-level precision
+func (p *Pane) GetTextInRangeChar(startLine, startCol, endLine, endCol int) string {
+	if len(p.LogLines) == 0 {
+		return ""
+	}
+
+	// Build the display lines (same as render) to match what user sees
+	const timestampWidth = 9
+	contentWidth := p.Viewport.Width - timestampWidth - 1
+	if contentWidth < 10 {
+		contentWidth = 10
+	}
+
+	var displayLines []string
+	for _, line := range p.LogLines {
+		plainContent := stripANSI(line.Content)
+		ts := line.Timestamp.Format("15:04:05")
+
+		if p.wordWrap {
+			wrapped := wrap.String(plainContent, contentWidth)
+			wrappedLines := strings.Split(wrapped, "\n")
+			for i, wline := range wrappedLines {
+				if i == 0 {
+					displayLines = append(displayLines, ts+" "+wline)
+				} else {
+					displayLines = append(displayLines, strings.Repeat(" ", 8)+" "+wline)
+				}
+			}
+		} else {
+			displayContent := plainContent
+			if p.xOffset > 0 {
+				runes := []rune(plainContent)
+				if p.xOffset < len(runes) {
+					displayContent = string(runes[p.xOffset:])
+				} else {
+					displayContent = ""
+				}
+			}
+			displayLines = append(displayLines, ts+" "+displayContent)
+		}
+	}
+
+	// Adjust for viewport scroll offset
+	offset := p.Viewport.YOffset
+	startLine += offset
+	endLine += offset
+
+	// Clamp to valid range
+	if startLine < 0 {
+		startLine = 0
+		startCol = 0
+	}
+	if endLine >= len(displayLines) {
+		endLine = len(displayLines) - 1
+		if endLine >= 0 {
+			endCol = len([]rune(displayLines[endLine]))
+		}
+	}
+	if startLine > endLine || startLine >= len(displayLines) {
+		return ""
+	}
+
+	// Extract selected text
+	var result strings.Builder
+	for i := startLine; i <= endLine; i++ {
+		if i >= len(displayLines) {
+			break
+		}
+		lineRunes := []rune(displayLines[i])
+		lineLen := len(lineRunes)
+
+		var lineStartCol, lineEndCol int
+		if i == startLine && i == endLine {
+			// Single line selection
+			lineStartCol = startCol
+			lineEndCol = endCol
+		} else if i == startLine {
+			// First line
+			lineStartCol = startCol
+			lineEndCol = lineLen
+		} else if i == endLine {
+			// Last line
+			lineStartCol = 0
+			lineEndCol = endCol
+		} else {
+			// Middle lines - full line
+			lineStartCol = 0
+			lineEndCol = lineLen
+		}
+
+		// Clamp
+		if lineStartCol < 0 {
+			lineStartCol = 0
+		}
+		if lineEndCol > lineLen {
+			lineEndCol = lineLen
+		}
+		if lineStartCol < lineEndCol {
+			result.WriteString(string(lineRunes[lineStartCol:lineEndCol]))
+		}
+		if i < endLine {
+			result.WriteString("\n")
+		}
+	}
+
+	return result.String()
 }
 
 // View renders the pane using cached dimensions for stability
@@ -300,13 +789,27 @@ func (p *Pane) View(width, height int, focused bool) (result string) {
 	}
 
 	// Get viewport content - content is already sanitized when added
-	// Ensure viewport content fits exactly within bounds
-	viewportContent := lipgloss.NewStyle().
-		Width(innerWidth).
-		MaxWidth(innerWidth).
-		Height(vpHeight).
-		MaxHeight(vpHeight).
-		Render(p.Viewport.View())
+	totalLines := p.Viewport.TotalLineCount()
+	var viewportContent string
+
+	if totalLines > vpHeight && vpHeight > 0 {
+		// Add scroll bar when content exceeds viewport height
+		scrollBar := p.renderScrollBar(vpHeight, totalLines, p.Viewport.YOffset)
+		vc := lipgloss.NewStyle().
+			Width(innerWidth - 1).
+			MaxWidth(innerWidth - 1).
+			Height(vpHeight).
+			MaxHeight(vpHeight).
+			Render(p.Viewport.View())
+		viewportContent = lipgloss.JoinHorizontal(lipgloss.Top, vc, scrollBar)
+	} else {
+		viewportContent = lipgloss.NewStyle().
+			Width(innerWidth).
+			MaxWidth(innerWidth).
+			Height(vpHeight).
+			MaxHeight(vpHeight).
+			Render(p.Viewport.View())
+	}
 
 	// Combine title and viewport
 	content := lipgloss.JoinVertical(lipgloss.Left,

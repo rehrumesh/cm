@@ -5,10 +5,12 @@ go 1.24.2
 toolchain go1.24.3
 
 require (
+	github.com/atotto/clipboard v0.1.4
 	github.com/charmbracelet/bubbles v0.21.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
 	github.com/docker/docker v28.5.2+incompatible
+	github.com/muesli/reflow v0.3.0
 	gopkg.in/yaml.v3 v3.0.1
 )
 

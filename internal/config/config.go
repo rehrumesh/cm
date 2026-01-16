@@ -62,6 +62,9 @@ type KeyBindings struct {
 	Quit          string `json:"quit"`
 	SavedProjects string `json:"saved_projects_key"`
 	Config        string `json:"config"`
+	CopyLogs      string `json:"copy_logs"`
+	WordWrap      string `json:"word_wrap"`
+	DebugToggle   string `json:"debug_toggle"`
 }
 
 // DefaultKeyBindings returns the default key bindings
@@ -108,6 +111,9 @@ func DefaultKeyBindings() KeyBindings {
 		Quit:          "q,ctrl+c",
 		SavedProjects: "p",
 		Config:        "c",
+		CopyLogs:      "y",
+		WordWrap:      "w",
+		DebugToggle:   "ctrl+g",
 	}
 }
 
@@ -236,6 +242,114 @@ func LoadKeyBindings() KeyBindings {
 	var kb KeyBindings
 	if err := json.Unmarshal(data, &kb); err != nil {
 		return DefaultKeyBindings()
+	}
+
+	// Fill in any missing keys with defaults (for forward compatibility)
+	defaults := DefaultKeyBindings()
+	if kb.Up == "" {
+		kb.Up = defaults.Up
+	}
+	if kb.Down == "" {
+		kb.Down = defaults.Down
+	}
+	if kb.Left == "" {
+		kb.Left = defaults.Left
+	}
+	if kb.Right == "" {
+		kb.Right = defaults.Right
+	}
+	if kb.ScrollUp == "" {
+		kb.ScrollUp = defaults.ScrollUp
+	}
+	if kb.ScrollDown == "" {
+		kb.ScrollDown = defaults.ScrollDown
+	}
+	if kb.Top == "" {
+		kb.Top = defaults.Top
+	}
+	if kb.Bottom == "" {
+		kb.Bottom = defaults.Bottom
+	}
+	if kb.NextPane == "" {
+		kb.NextPane = defaults.NextPane
+	}
+	if kb.PrevPane == "" {
+		kb.PrevPane = defaults.PrevPane
+	}
+	if kb.Select == "" {
+		kb.Select = defaults.Select
+	}
+	if kb.SelectAll == "" {
+		kb.SelectAll = defaults.SelectAll
+	}
+	if kb.ClearAll == "" {
+		kb.ClearAll = defaults.ClearAll
+	}
+	if kb.Confirm == "" {
+		kb.Confirm = defaults.Confirm
+	}
+	if kb.Back == "" {
+		kb.Back = defaults.Back
+	}
+	if kb.Start == "" {
+		kb.Start = defaults.Start
+	}
+	if kb.Stop == "" {
+		kb.Stop = defaults.Stop
+	}
+	if kb.Restart == "" {
+		kb.Restart = defaults.Restart
+	}
+	if kb.Kill == "" {
+		kb.Kill = defaults.Kill
+	}
+	if kb.Remove == "" {
+		kb.Remove = defaults.Remove
+	}
+	if kb.Exec == "" {
+		kb.Exec = defaults.Exec
+	}
+	if kb.Inspect == "" {
+		kb.Inspect = defaults.Inspect
+	}
+	if kb.ComposeUp == "" {
+		kb.ComposeUp = defaults.ComposeUp
+	}
+	if kb.ComposeDown == "" {
+		kb.ComposeDown = defaults.ComposeDown
+	}
+	if kb.ComposeRestart == "" {
+		kb.ComposeRestart = defaults.ComposeRestart
+	}
+	if kb.ComposeBuild == "" {
+		kb.ComposeBuild = defaults.ComposeBuild
+	}
+	if kb.Refresh == "" {
+		kb.Refresh = defaults.Refresh
+	}
+	if kb.Search == "" {
+		kb.Search = defaults.Search
+	}
+	if kb.Help == "" {
+		kb.Help = defaults.Help
+	}
+	if kb.Quit == "" {
+		kb.Quit = defaults.Quit
+	}
+	if kb.SavedProjects == "" {
+		kb.SavedProjects = defaults.SavedProjects
+	}
+	if kb.Config == "" {
+		kb.Config = defaults.Config
+	}
+	if kb.CopyLogs == "" {
+		kb.CopyLogs = defaults.CopyLogs
+	}
+	if kb.WordWrap == "" {
+		kb.WordWrap = defaults.WordWrap
+	}
+	if kb.DebugToggle == "" {
+		kb.DebugToggle = defaults.DebugToggle
 	}
 
 	return kb

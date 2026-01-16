@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"cm/internal/config"
+	"cm/internal/debug"
 	"cm/internal/docker"
 	"cm/internal/notify"
 	"cm/internal/ui"
@@ -42,6 +43,7 @@ ARGUMENTS
 OPTIONS
   -h, --help      Show this help message
   -v, --version   Show version information
+  -d, --debug     Enable debug logging (~/.cm/debug.log)
 
 EXAMPLES
   cm              Start interactive container selector
@@ -55,8 +57,11 @@ KEYBINDINGS
   enter           Confirm and view logs
   u/s/r           Start/stop/restart container
   b               Build and restart (compose)
+  y               Copy logs to clipboard
+  w               Toggle word wrap
   p               Manage saved projects
   c               Open configuration
+  ctrl+g          Toggle debug logging
   q, ctrl+c       Quit
 
 CONFIG FILES
@@ -68,16 +73,33 @@ CONFIG FILES
 }
 
 func main() {
-	// Handle help flag
-	if len(os.Args) > 1 && (os.Args[1] == "--help" || os.Args[1] == "-h") {
-		printHelp()
-		os.Exit(0)
+	// Parse flags and arguments
+	debugMode := false
+	var containerArgs []string
+
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "-h", "--help":
+			printHelp()
+			os.Exit(0)
+		case "-v", "--version":
+			fmt.Printf("cm %s (commit: %s, built: %s)\n", Version, Commit, BuildTime)
+			os.Exit(0)
+		case "-d", "--debug":
+			debugMode = true
+		default:
+			// Treat as container name if not a flag
+			if !strings.HasPrefix(arg, "-") {
+				containerArgs = append(containerArgs, arg)
+			}
+		}
 	}
 
-	// Handle version flag
-	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
-		fmt.Printf("cm %s (commit: %s, built: %s)\n", Version, Commit, BuildTime)
-		os.Exit(0)
+	// Initialize debug logging
+	debug.Init(debugMode)
+	defer debug.Close()
+	if debugMode {
+		fmt.Fprintf(os.Stderr, "Debug logging enabled: %s\n", debug.LogPath())
 	}
 
 	// Ensure config file exists with defaults
@@ -96,15 +118,17 @@ func main() {
 	}
 	defer func() { _ = dockerClient.Close() }()
 
+	debug.Log("Docker client initialized")
+
 	// Check for container name arguments
 	var initialContainers []docker.Container
-	if len(os.Args) > 1 {
-		containerNames := os.Args[1:]
-		initialContainers = findContainersByName(dockerClient, containerNames)
+	if len(containerArgs) > 0 {
+		initialContainers = findContainersByName(dockerClient, containerArgs)
 		if len(initialContainers) == 0 {
-			fmt.Fprintf(os.Stderr, "No matching containers found for: %s\n", strings.Join(containerNames, ", "))
+			fmt.Fprintf(os.Stderr, "No matching containers found for: %s\n", strings.Join(containerArgs, ", "))
 			os.Exit(1)
 		}
+		debug.Log("Found %d containers matching args: %v", len(initialContainers), containerArgs)
 	}
 
 	// Create and run the application

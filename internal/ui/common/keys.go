@@ -51,6 +51,9 @@ type KeyMap struct {
 	Config        key.Binding
 	SavedProjects key.Binding
 	Quit          key.Binding
+	CopyLogs      key.Binding
+	WordWrap      key.Binding
+	DebugToggle   key.Binding
 }
 
 // parseKeys splits a comma-separated key string into a slice
@@ -210,6 +213,18 @@ func DefaultKeyMap() KeyMap {
 		Quit: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Quit)...),
 			key.WithHelp("q", "quit"),
+		),
+		CopyLogs: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.CopyLogs)...),
+			key.WithHelp("y", "copy logs"),
+		),
+		WordWrap: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.WordWrap)...),
+			key.WithHelp("w", "word wrap"),
+		),
+		DebugToggle: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.DebugToggle)...),
+			key.WithHelp("ctrl+g", "debug logs"),
 		),
 	}
 }

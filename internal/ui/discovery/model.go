@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"cm/internal/debug"
 	"cm/internal/docker"
 	"cm/internal/ui/common"
 
@@ -262,6 +263,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.SavedProjects):
 			return m, m.savedProjectsModal.Open()
+
+		case key.Matches(msg, m.keys.DebugToggle):
+			enabled := debug.Toggle()
+			status := "off"
+			if enabled {
+				status = "on"
+			}
+			return m, m.toast.Show("Debug Log", status, common.ToastSuccess)
 
 		case key.Matches(msg, m.keys.Quit):
 			return m, tea.Quit
@@ -659,6 +668,7 @@ func (m Model) renderHelpBar() string {
 		k("b") + d(":build ") +
 		k("p") + d(":projects ") +
 		k("c") + d(":config ") +
+		k("ctrl+g") + d(":debug logs ") +
 		k("q") + d(":quit")
 
 	width := m.width

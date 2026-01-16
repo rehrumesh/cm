@@ -48,6 +48,7 @@ build-all: $(DIST_DIR)
 # Install to user bin directory
 install: build
 	@mkdir -p $(INSTALL_PATH)
+	@rm -f $(INSTALL_PATH)/$(BINARY_NAME)
 	@cp $(DIST_DIR)/$(BINARY_NAME) $(INSTALL_PATH)/$(BINARY_NAME)
 	@chmod +x $(INSTALL_PATH)/$(BINARY_NAME)
 	@echo "Installed $(BINARY_NAME) to $(INSTALL_PATH)"
