@@ -5,6 +5,8 @@ A terminal UI application for monitoring Docker container logs in real-time with
 ![Go Version](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat&logo=go)
 ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
+![cm demo](cm.gif)
+
 ## Features
 
 - **Container Discovery** - Automatically discovers running Docker containers grouped by Compose project
