@@ -47,6 +47,11 @@ type ContainerActionStartMsg struct {
 	Action      string
 }
 
+// StreamClosedMsg is sent when a log stream channel closes (container stopped/restarted)
+type StreamClosedMsg struct {
+	ContainerID string
+}
+
 // streamInfo holds the channels for a container's log stream
 type streamInfo struct {
 	logChan <-chan docker.LogLine
@@ -166,7 +171,8 @@ func (m Model) waitForLog(containerID string, logChan <-chan docker.LogLine) tea
 	return func() tea.Msg {
 		line, ok := <-logChan
 		if !ok {
-			return nil
+			// Channel closed - container likely stopped or restarted
+			return StreamClosedMsg{ContainerID: containerID}
 		}
 		return LogLineMsg{ContainerID: containerID, Line: line}
 	}
@@ -257,8 +263,44 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					ContainerID: msg.ContainerID,
 					Timestamp:   time.Now(),
 					Stream:      "system",
-					Content:     fmt.Sprintf("--- Stream ended: %v ---", msg.Err),
+					Content:     fmt.Sprintf("--- Stream error: %v ---", msg.Err),
 				})
+				m.panes[i].AddLogLine(docker.LogLine{
+					ContainerID: msg.ContainerID,
+					Timestamp:   time.Now(),
+					Stream:      "system",
+					Content:     "--- Waiting for container to restart... ---",
+				})
+				// Try to reconnect in case container was restarted externally
+				cmds = append(cmds, m.tryReconnect(m.panes[i].Container))
+				break
+			}
+		}
+
+	case StreamClosedMsg:
+		// Log stream channel closed - container likely stopped or restarted externally
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID {
+				// Only try to reconnect if we haven't already started
+				if m.panes[i].Connected {
+					m.panes[i].Connected = false
+					m.panes[i].AddLogLine(docker.LogLine{
+						ContainerID: msg.ContainerID,
+						Timestamp:   time.Now(),
+						Stream:      "system",
+						Content:     "--- Stream ended ---",
+					})
+					m.panes[i].AddLogLine(docker.LogLine{
+						ContainerID: msg.ContainerID,
+						Timestamp:   time.Now(),
+						Stream:      "system",
+						Content:     "--- Waiting for container to restart... ---",
+					})
+					// Clean up old stream reference
+					delete(m.streams, msg.ContainerID)
+					// Try to reconnect
+					cmds = append(cmds, m.tryReconnect(m.panes[i].Container))
+				}
 				break
 			}
 		}
@@ -465,6 +507,20 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					// Restart log stream for this container
 					cmds = append(cmds, m.restartLogStream(m.panes[i].Container))
 				}
+				break
+			}
+		}
+
+	case reconnectFailedMsg:
+		// All reconnection attempts failed
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID {
+				m.panes[i].AddLogLine(docker.LogLine{
+					ContainerID: msg.ContainerID,
+					Timestamp:   time.Now(),
+					Stream:      "system",
+					Content:     "--- Could not reconnect. Container may have stopped. ---",
+				})
 				break
 			}
 		}
@@ -1216,4 +1272,65 @@ func (m Model) restartLogStream(cont docker.Container) tea.Cmd {
 type restartStreamMsg struct {
 	OldContainerID string
 	NewContainer   docker.Container
+}
+
+// tryReconnect attempts to reconnect to a container after the stream ends
+// This handles external restarts (docker compose down/up from another terminal)
+func (m Model) tryReconnect(cont docker.Container) tea.Cmd {
+	return func() tea.Msg {
+		// Retry a few times with increasing delays
+		delays := []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second}
+
+		for attempt, delay := range delays {
+			time.Sleep(delay)
+
+			// Check if context was cancelled
+			select {
+			case <-m.ctx.Done():
+				return nil
+			default:
+			}
+
+			containers, err := m.dockerClient.ListContainers(m.ctx)
+			if err != nil {
+				debug.Log("Reconnect attempt %d failed to list containers: %v", attempt+1, err)
+				continue
+			}
+
+			// First try: match by compose project + service (most reliable for compose)
+			for _, c := range containers {
+				if cont.ComposeProject != "" && cont.ComposeService != "" &&
+					c.ComposeProject == cont.ComposeProject &&
+					c.ComposeService == cont.ComposeService &&
+					c.State == "running" {
+					debug.Log("Reconnecting to container %s (was %s, now %s)", c.DisplayName(), cont.ID[:12], c.ID[:12])
+					return restartStreamMsg{
+						OldContainerID: cont.ID,
+						NewContainer:   c,
+					}
+				}
+			}
+
+			// Second try: match by container name
+			for _, c := range containers {
+				if c.Name == cont.Name && c.State == "running" {
+					debug.Log("Reconnecting to container %s by name (was %s, now %s)", c.Name, cont.ID[:12], c.ID[:12])
+					return restartStreamMsg{
+						OldContainerID: cont.ID,
+						NewContainer:   c,
+					}
+				}
+			}
+
+			debug.Log("Reconnect attempt %d: container %s not found or not running", attempt+1, cont.DisplayName())
+		}
+
+		debug.Log("Giving up reconnection attempts for %s", cont.DisplayName())
+		return reconnectFailedMsg{ContainerID: cont.ID}
+	}
+}
+
+// reconnectFailedMsg is sent when all reconnection attempts have failed
+type reconnectFailedMsg struct {
+	ContainerID string
 }
