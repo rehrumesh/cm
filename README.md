@@ -13,8 +13,10 @@ A terminal UI application for monitoring Docker container logs in real-time with
 - **Multi-Select** - Select multiple containers to monitor simultaneously
 - **Tiled Log View** - View logs from multiple containers in a responsive grid layout
 - **Real-time Streaming** - Logs stream in real-time with automatic scrolling
+- **Auto-Reconnect** - Automatically reconnects when containers restart externally (e.g., `docker compose restart`)
 - **Double-Click Maximize** - Double-click any pane to maximize/restore
 - **Container Actions** - Restart, rebuild, or down/up containers directly from the UI
+- **Shell Access** - Open an interactive shell in any running container
 - **Compose Integration** - Full Docker Compose support with project grouping
 - **Stopped Services** - Shows stopped Compose services that can be started
 
@@ -199,7 +201,10 @@ Monitor logs from selected containers:
 | `1-9` | Jump to specific pane |
 | `r` | Restart focused container |
 | `R` | Compose down/up focused service |
-| `B` | Build (no-cache) and up focused service |
+| `b` | Build (no-cache) and up focused service |
+| `e` | Open shell in focused container |
+| `y` | Copy logs to clipboard |
+| `w` | Toggle word wrap |
 | `Esc` | Return to container selection |
 | `q` | Quit |
 

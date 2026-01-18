@@ -3,6 +3,7 @@ package logview
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -481,6 +482,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				debug.Log("Debug toggled on from logview")
 			}
 			cmds = append(cmds, m.toast.Show("Debug Log", status, common.ToastSuccess))
+
+		case key.Matches(msg, m.keys.Exec):
+			// Open shell in focused container
+			paneIdx := m.focusedPane
+			if m.maximizedPane != -1 {
+				paneIdx = m.maximizedPane
+			}
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				pane := &m.panes[paneIdx]
+				if pane.Container.State == "running" {
+					debug.Log("Opening shell in container: %s", pane.Container.DisplayName())
+					return m, m.execShell(pane.Container.ID)
+				} else {
+					cmds = append(cmds, m.toast.Show("Cannot exec", "Container not running", common.ToastError))
+				}
+			}
 		}
 
 	case ContainerActionMsg:
@@ -521,6 +538,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					Stream:      "system",
 					Content:     "--- Could not reconnect. Container may have stopped. ---",
 				})
+				break
+			}
+		}
+
+	case shellExitMsg:
+		// Shell session ended, show toast
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID {
+				if msg.Err != nil {
+					cmds = append(cmds, m.toast.Show("Shell exited", msg.Err.Error(), common.ToastError))
+				} else {
+					cmds = append(cmds, m.toast.Show("Shell exited", m.panes[i].Container.DisplayName(), common.ToastSuccess))
+				}
 				break
 			}
 		}
@@ -1171,11 +1201,12 @@ func (m Model) renderHelpBar() string {
 		help = " " + key("r") + desc(":restart") +
 			desc("  ") + key("R") + desc(":down/up") +
 			desc("  ") + key("b") + desc(":build") +
+			desc("  ") + key("e") + desc(":shell") +
 			desc("  ") + key("↑↓←→") + desc(":scroll") +
 			desc("  ") + key("y") + desc(":copy") +
 			desc("  ") + key("w") + desc(":wrap") +
 			desc("  ") + key("c") + desc(":config") +
-			desc("  ") + key("ctrl+g") + desc(":debug logs") +
+			desc("  ") + key("ctrl+g") + desc(":debug") +
 			desc("  ") + key("esc") + desc(":min") +
 			desc("  ") + key("q") + desc(":quit")
 	} else {
@@ -1183,11 +1214,12 @@ func (m Model) renderHelpBar() string {
 		help = " " + key("r") + desc(":restart") +
 			desc("  ") + key("R") + desc(":down/up") +
 			desc("  ") + key("b") + desc(":build") +
+			desc("  ") + key("e") + desc(":shell") +
 			desc("  ") + key("←↑↓→") + desc(":nav") +
 			desc("  ") + key("y") + desc(":copy") +
 			desc("  ") + key("w") + desc(":wrap") +
 			desc("  ") + key("c") + desc(":config") +
-			desc("  ") + key("ctrl+g") + desc(":debug logs") +
+			desc("  ") + key("ctrl+g") + desc(":debug") +
 			desc("  ") + key("esc") + desc(":back") +
 			desc("  ") + key("q") + desc(":quit")
 	}
@@ -1333,4 +1365,19 @@ func (m Model) tryReconnect(cont docker.Container) tea.Cmd {
 // reconnectFailedMsg is sent when all reconnection attempts have failed
 type reconnectFailedMsg struct {
 	ContainerID string
+}
+
+// shellExitMsg is sent when an exec shell session ends
+type shellExitMsg struct {
+	ContainerID string
+	Err         error
+}
+
+// execShell opens an interactive shell in the container
+func (m Model) execShell(containerID string) tea.Cmd {
+	// Try sh first as it's more universally available than bash
+	c := exec.Command("docker", "exec", "-it", containerID, "sh")
+	return tea.ExecProcess(c, func(err error) tea.Msg {
+		return shellExitMsg{ContainerID: containerID, Err: err}
+	})
 }
