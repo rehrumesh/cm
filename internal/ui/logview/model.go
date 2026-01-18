@@ -493,7 +493,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				pane := &m.panes[paneIdx]
 				if pane.Container.State == "running" {
 					debug.Log("Opening shell in container: %s", pane.Container.DisplayName())
-					return m, m.execShell(pane.Container.ID)
+					return m, m.execShell(pane.Container)
 				} else {
 					cmds = append(cmds, m.toast.Show("Cannot exec", "Container not running", common.ToastError))
 				}
@@ -1374,10 +1374,36 @@ type shellExitMsg struct {
 }
 
 // execShell opens an interactive shell in the container
-func (m Model) execShell(containerID string) tea.Cmd {
-	// Try sh first as it's more universally available than bash
-	c := exec.Command("docker", "exec", "-it", containerID, "sh")
+func (m Model) execShell(container docker.Container) tea.Cmd {
+	shortID := container.ID
+	if len(container.ID) > 12 {
+		shortID = container.ID[:12]
+	}
+
+	// Build the shell script that prints banner and execs into container
+	// Get whoami, pwd inside the container for the banner
+	script := fmt.Sprintf(`
+# Get container info
+USER=$(docker exec %s whoami 2>/dev/null || echo "unknown")
+PWD=$(docker exec %s pwd 2>/dev/null || echo "/")
+
+# Print banner
+printf '\n'
+printf '\033[1;36m┌──────────────────────────────────────────────────────────┐\033[0m\n'
+printf '\033[1;36m│\033[0m  \033[1;33mContainer:\033[0m %%s\n' "%s"
+printf '\033[1;36m│\033[0m  \033[1;33mID:\033[0m        %%s\n' "%s"
+printf '\033[1;36m│\033[0m  \033[1;33mImage:\033[0m     %%s\n' "%s"
+printf '\033[1;36m│\033[0m  \033[1;33mUser:\033[0m      %%s\n' "$USER"
+printf '\033[1;36m│\033[0m  \033[1;33mWorkdir:\033[0m   %%s\n' "$PWD"
+printf '\033[1;36m└──────────────────────────────────────────────────────────┘\033[0m\n'
+printf '\n'
+
+# Exec into container
+docker exec -it %s sh
+`, container.ID, container.ID, container.DisplayName(), shortID, container.Image, container.ID)
+
+	c := exec.Command("sh", "-c", script)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
-		return shellExitMsg{ContainerID: containerID, Err: err}
+		return shellExitMsg{ContainerID: container.ID, Err: err}
 	})
 }
