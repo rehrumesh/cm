@@ -1744,26 +1744,45 @@ func (m Model) execShell(container docker.Container) tea.Cmd {
 	}
 
 	// Build the shell script that prints banner and execs into container
-	// Get whoami, pwd inside the container for the banner
+	// Try shells in order of preference: bash, sh, ash, zsh
+	// - bash: most feature-rich, common on Debian/Ubuntu/CentOS
+	// - sh: POSIX standard, nearly universal (symlink to dash/bash/ash)
+	// - ash: BusyBox shell used in Alpine Linux
+	// - zsh: popular among devs, sometimes in custom images
 	script := fmt.Sprintf(`
 # Get container info
 USER=$(docker exec %s whoami 2>/dev/null || echo "unknown")
 PWD=$(docker exec %s pwd 2>/dev/null || echo "/")
 
+# Detect available shell
+SHELL_TO_USE=""
+for shell in bash sh ash zsh; do
+    if docker exec %s which $shell >/dev/null 2>&1; then
+        SHELL_TO_USE=$shell
+        break
+    fi
+done
+
 # Print banner
 printf '\n'
-printf '\033[1;36m┌──────────────────────────────────────────────────────────┐\033[0m\n'
-printf '\033[1;36m│\033[0m  \033[1;33mContainer:\033[0m %%s\n' "%s"
-printf '\033[1;36m│\033[0m  \033[1;33mID:\033[0m        %%s\n' "%s"
-printf '\033[1;36m│\033[0m  \033[1;33mImage:\033[0m     %%s\n' "%s"
-printf '\033[1;36m│\033[0m  \033[1;33mUser:\033[0m      %%s\n' "$USER"
-printf '\033[1;36m│\033[0m  \033[1;33mWorkdir:\033[0m   %%s\n' "$PWD"
-printf '\033[1;36m└──────────────────────────────────────────────────────────┘\033[0m\n'
+printf '\033[1;36m  ─────────────────────────────────────────────────\033[0m\n'
+printf '  \033[1;33mContainer:\033[0m  %%s\n' "%s"
+printf '  \033[1;33mID:\033[0m         %%s\n' "%s"
+printf '  \033[1;33mImage:\033[0m      %%s\n' "%s"
+printf '  \033[1;33mUser:\033[0m       %%s\n' "$USER"
+printf '  \033[1;33mWorkdir:\033[0m    %%s\n' "$PWD"
+printf '  \033[1;33mShell:\033[0m      %%s\n' "$SHELL_TO_USE"
+printf '\033[1;36m  ─────────────────────────────────────────────────\033[0m\n'
 printf '\n'
 
-# Exec into container
-docker exec -it %s sh
-`, container.ID, container.ID, container.DisplayName(), shortID, container.Image, container.ID)
+# Execute shell or show error
+if [ -n "$SHELL_TO_USE" ]; then
+    exec docker exec -it %s $SHELL_TO_USE
+else
+    printf '\033[1;31mNo shell found in container (tried: bash, sh, ash, zsh)\033[0m\n'
+    exit 1
+fi
+`, container.ID, container.ID, container.ID, container.DisplayName(), shortID, container.Image, container.ID)
 
 	c := exec.Command("sh", "-c", script)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
