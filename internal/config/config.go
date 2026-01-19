@@ -65,6 +65,19 @@ type KeyBindings struct {
 	CopyLogs      string `json:"copy_logs"`
 	WordWrap      string `json:"word_wrap"`
 	DebugToggle   string `json:"debug_toggle"`
+	ClearLogs     string `json:"clear_logs"`
+	PauseLogs     string `json:"pause_logs"`
+
+	// Pane shortcuts
+	Pane1 string `json:"pane_1"`
+	Pane2 string `json:"pane_2"`
+	Pane3 string `json:"pane_3"`
+	Pane4 string `json:"pane_4"`
+	Pane5 string `json:"pane_5"`
+	Pane6 string `json:"pane_6"`
+	Pane7 string `json:"pane_7"`
+	Pane8 string `json:"pane_8"`
+	Pane9 string `json:"pane_9"`
 }
 
 // DefaultKeyBindings returns the default key bindings
@@ -79,8 +92,8 @@ func DefaultKeyBindings() KeyBindings {
 		ScrollDown: "ctrl+d",
 		Top:        "g",
 		Bottom:     "G",
-		NextPane:   "tab,]",
-		PrevPane:   "shift+tab,[",
+		NextPane:   "}",
+		PrevPane:   "{",
 
 		// Selection
 		Select:    "space",
@@ -114,6 +127,19 @@ func DefaultKeyBindings() KeyBindings {
 		CopyLogs:      "y",
 		WordWrap:      "w",
 		DebugToggle:   "ctrl+g",
+		ClearLogs:     "ctrl+l",
+		PauseLogs:     "P",
+
+		// Pane shortcuts
+		Pane1: "1",
+		Pane2: "2",
+		Pane3: "3",
+		Pane4: "4",
+		Pane5: "5",
+		Pane6: "6",
+		Pane7: "7",
+		Pane8: "8",
+		Pane9: "9",
 	}
 }
 
@@ -246,110 +272,66 @@ func LoadKeyBindings() KeyBindings {
 
 	// Fill in any missing keys with defaults (for forward compatibility)
 	defaults := DefaultKeyBindings()
-	if kb.Up == "" {
-		kb.Up = defaults.Up
+	modified := false
+
+	// Helper to set default if empty
+	setDefault := func(current *string, def string) {
+		if *current == "" {
+			*current = def
+			modified = true
+		}
 	}
-	if kb.Down == "" {
-		kb.Down = defaults.Down
-	}
-	if kb.Left == "" {
-		kb.Left = defaults.Left
-	}
-	if kb.Right == "" {
-		kb.Right = defaults.Right
-	}
-	if kb.ScrollUp == "" {
-		kb.ScrollUp = defaults.ScrollUp
-	}
-	if kb.ScrollDown == "" {
-		kb.ScrollDown = defaults.ScrollDown
-	}
-	if kb.Top == "" {
-		kb.Top = defaults.Top
-	}
-	if kb.Bottom == "" {
-		kb.Bottom = defaults.Bottom
-	}
-	if kb.NextPane == "" {
-		kb.NextPane = defaults.NextPane
-	}
-	if kb.PrevPane == "" {
-		kb.PrevPane = defaults.PrevPane
-	}
-	if kb.Select == "" {
-		kb.Select = defaults.Select
-	}
-	if kb.SelectAll == "" {
-		kb.SelectAll = defaults.SelectAll
-	}
-	if kb.ClearAll == "" {
-		kb.ClearAll = defaults.ClearAll
-	}
-	if kb.Confirm == "" {
-		kb.Confirm = defaults.Confirm
-	}
-	if kb.Back == "" {
-		kb.Back = defaults.Back
-	}
-	if kb.Start == "" {
-		kb.Start = defaults.Start
-	}
-	if kb.Stop == "" {
-		kb.Stop = defaults.Stop
-	}
-	if kb.Restart == "" {
-		kb.Restart = defaults.Restart
-	}
-	if kb.Kill == "" {
-		kb.Kill = defaults.Kill
-	}
-	if kb.Remove == "" {
-		kb.Remove = defaults.Remove
-	}
-	if kb.Exec == "" {
-		kb.Exec = defaults.Exec
-	}
-	if kb.Inspect == "" {
-		kb.Inspect = defaults.Inspect
-	}
-	if kb.ComposeUp == "" {
-		kb.ComposeUp = defaults.ComposeUp
-	}
-	if kb.ComposeDown == "" {
-		kb.ComposeDown = defaults.ComposeDown
-	}
-	if kb.ComposeRestart == "" {
-		kb.ComposeRestart = defaults.ComposeRestart
-	}
-	if kb.ComposeBuild == "" {
-		kb.ComposeBuild = defaults.ComposeBuild
-	}
-	if kb.Refresh == "" {
-		kb.Refresh = defaults.Refresh
-	}
-	if kb.Search == "" {
-		kb.Search = defaults.Search
-	}
-	if kb.Help == "" {
-		kb.Help = defaults.Help
-	}
-	if kb.Quit == "" {
-		kb.Quit = defaults.Quit
-	}
-	if kb.SavedProjects == "" {
-		kb.SavedProjects = defaults.SavedProjects
-	}
-	if kb.Config == "" {
-		kb.Config = defaults.Config
-	}
-	if kb.CopyLogs == "" {
-		kb.CopyLogs = defaults.CopyLogs
-	}
-	if kb.WordWrap == "" {
-		kb.WordWrap = defaults.WordWrap
-	}
-	if kb.DebugToggle == "" {
-		kb.DebugToggle = defaults.DebugToggle
+
+	setDefault(&kb.Up, defaults.Up)
+	setDefault(&kb.Down, defaults.Down)
+	setDefault(&kb.Left, defaults.Left)
+	setDefault(&kb.Right, defaults.Right)
+	setDefault(&kb.ScrollUp, defaults.ScrollUp)
+	setDefault(&kb.ScrollDown, defaults.ScrollDown)
+	setDefault(&kb.Top, defaults.Top)
+	setDefault(&kb.Bottom, defaults.Bottom)
+	setDefault(&kb.NextPane, defaults.NextPane)
+	setDefault(&kb.PrevPane, defaults.PrevPane)
+	setDefault(&kb.Select, defaults.Select)
+	setDefault(&kb.SelectAll, defaults.SelectAll)
+	setDefault(&kb.ClearAll, defaults.ClearAll)
+	setDefault(&kb.Confirm, defaults.Confirm)
+	setDefault(&kb.Back, defaults.Back)
+	setDefault(&kb.Start, defaults.Start)
+	setDefault(&kb.Stop, defaults.Stop)
+	setDefault(&kb.Restart, defaults.Restart)
+	setDefault(&kb.Kill, defaults.Kill)
+	setDefault(&kb.Remove, defaults.Remove)
+	setDefault(&kb.Exec, defaults.Exec)
+	setDefault(&kb.Inspect, defaults.Inspect)
+	setDefault(&kb.ComposeUp, defaults.ComposeUp)
+	setDefault(&kb.ComposeDown, defaults.ComposeDown)
+	setDefault(&kb.ComposeRestart, defaults.ComposeRestart)
+	setDefault(&kb.ComposeBuild, defaults.ComposeBuild)
+	setDefault(&kb.Refresh, defaults.Refresh)
+	setDefault(&kb.Search, defaults.Search)
+	setDefault(&kb.Help, defaults.Help)
+	setDefault(&kb.Quit, defaults.Quit)
+	setDefault(&kb.SavedProjects, defaults.SavedProjects)
+	setDefault(&kb.Config, defaults.Config)
+	setDefault(&kb.CopyLogs, defaults.CopyLogs)
+	setDefault(&kb.WordWrap, defaults.WordWrap)
+	setDefault(&kb.DebugToggle, defaults.DebugToggle)
+	setDefault(&kb.ClearLogs, defaults.ClearLogs)
+	setDefault(&kb.PauseLogs, defaults.PauseLogs)
+	setDefault(&kb.Pane1, defaults.Pane1)
+	setDefault(&kb.Pane2, defaults.Pane2)
+	setDefault(&kb.Pane3, defaults.Pane3)
+	setDefault(&kb.Pane4, defaults.Pane4)
+	setDefault(&kb.Pane5, defaults.Pane5)
+	setDefault(&kb.Pane6, defaults.Pane6)
+	setDefault(&kb.Pane7, defaults.Pane7)
+	setDefault(&kb.Pane8, defaults.Pane8)
+	setDefault(&kb.Pane9, defaults.Pane9)
+
+	// Save back to file if any new keys were added
+	if modified {
+		_ = SaveKeyBindings(kb)
 	}
 
 	return kb
@@ -505,12 +487,15 @@ func EnsureDefaults() error {
 		return err
 	}
 
-	// Keybindings file
+	// Keybindings file - create if doesn't exist, or load to add any missing keys
 	kbPath, _ := keybindingsPath()
 	if _, err := os.Stat(kbPath); os.IsNotExist(err) {
 		if err := SaveKeyBindings(DefaultKeyBindings()); err != nil {
 			return err
 		}
+	} else {
+		// Load keybindings to trigger adding any missing keys to the file
+		_ = LoadKeyBindings()
 	}
 
 	// Projects file

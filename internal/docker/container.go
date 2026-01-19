@@ -44,6 +44,26 @@ type ContainerGroup struct {
 	Containers  []Container
 }
 
+// ContainerDetails contains detailed information about a container
+type ContainerDetails struct {
+	ID          string
+	Name        string
+	Image       string
+	Status      string
+	State       string
+	Created     time.Time
+	Started     time.Time
+	Ports       []string
+	Env         []string
+	Volumes     []string
+	Networks    []string
+	Labels      map[string]string
+	Command     string
+	Entrypoint  string
+	WorkingDir  string
+	RestartPolicy string
+}
+
 // composeFileHeader is used to parse just the name field from compose files
 type composeFileHeader struct {
 	Name string `yaml:"name"`

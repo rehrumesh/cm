@@ -73,6 +73,9 @@ CONFIG FILES
 }
 
 func main() {
+	// Ensure config files exist with defaults (runs early to update keybindings)
+	_ = config.EnsureDefaults()
+
 	// Parse flags and arguments
 	debugMode := false
 	var containerArgs []string
@@ -101,9 +104,6 @@ func main() {
 	if debugMode {
 		fmt.Fprintf(os.Stderr, "Debug logging enabled: %s\n", debug.LogPath())
 	}
-
-	// Ensure config file exists with defaults
-	_ = config.EnsureDefaults()
 
 	// Initialize notification system
 	notify.Initialize()

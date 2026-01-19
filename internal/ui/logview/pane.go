@@ -121,6 +121,14 @@ type Pane struct {
 	wordWrap bool
 	// Horizontal scroll offset (for non-wrapped mode)
 	xOffset int
+	// Pause state
+	Paused       bool
+	pausedBuffer []docker.LogLine
+
+	// Search state
+	searchQuery   string
+	matchIndices  []int // line indices that match
+	currentMatch  int   // index into matchIndices
 }
 
 // NewPane creates a new log pane for a container
@@ -158,6 +166,16 @@ func (p *Pane) AddLogLine(line docker.LogLine) {
 		return
 	}
 
+	// If paused, buffer the log line instead of displaying it
+	if p.Paused {
+		p.pausedBuffer = append(p.pausedBuffer, line)
+		// Cap buffer size to prevent memory issues
+		if len(p.pausedBuffer) > maxLogLines {
+			p.pausedBuffer = p.pausedBuffer[len(p.pausedBuffer)-maxLogLines:]
+		}
+		return
+	}
+
 	p.LogLines = append(p.LogLines, line)
 
 	// Trim if too many lines
@@ -168,6 +186,275 @@ func (p *Pane) AddLogLine(line docker.LogLine) {
 	// Update viewport content
 	p.Viewport.SetContent(p.renderLogs())
 	p.Viewport.GotoBottom()
+}
+
+// TogglePause toggles the pause state of the pane
+func (p *Pane) TogglePause() bool {
+	p.Paused = !p.Paused
+
+	if !p.Paused {
+		// Flush buffered logs when unpausing
+		for _, line := range p.pausedBuffer {
+			p.LogLines = append(p.LogLines, line)
+		}
+		// Trim if too many lines
+		if len(p.LogLines) > maxLogLines {
+			p.LogLines = p.LogLines[len(p.LogLines)-maxLogLines:]
+		}
+		// Clear buffer
+		p.pausedBuffer = nil
+		// Update viewport
+		p.Viewport.SetContent(p.renderLogs())
+		p.Viewport.GotoBottom()
+	}
+
+	return p.Paused
+}
+
+// SetSearch sets the search query and finds matches
+func (p *Pane) SetSearch(query string) (matchCount int) {
+	p.searchQuery = query
+	p.matchIndices = nil
+	p.currentMatch = 0
+
+	if query == "" {
+		p.Viewport.SetContent(p.renderLogs())
+		return 0
+	}
+
+	// Find matching lines
+	queryLower := strings.ToLower(query)
+	for i, line := range p.LogLines {
+		if strings.Contains(strings.ToLower(line.Content), queryLower) {
+			p.matchIndices = append(p.matchIndices, i)
+		}
+	}
+
+	// Update viewport with search highlighting
+	p.Viewport.SetContent(p.renderLogsWithSearch())
+
+	// If we have matches, jump to the first one
+	if len(p.matchIndices) > 0 {
+		p.currentMatch = 1
+		p.jumpToMatch(0)
+	}
+
+	return len(p.matchIndices)
+}
+
+// ClearSearch clears the search state
+func (p *Pane) ClearSearch() {
+	p.searchQuery = ""
+	p.matchIndices = nil
+	p.currentMatch = 0
+	p.Viewport.SetContent(p.renderLogs())
+}
+
+// NextMatch jumps to the next search match
+func (p *Pane) NextMatch() (current, total int) {
+	if len(p.matchIndices) == 0 {
+		return 0, 0
+	}
+
+	p.currentMatch++
+	if p.currentMatch > len(p.matchIndices) {
+		p.currentMatch = 1
+	}
+	p.jumpToMatch(p.currentMatch - 1)
+
+	return p.currentMatch, len(p.matchIndices)
+}
+
+// PrevMatch jumps to the previous search match
+func (p *Pane) PrevMatch() (current, total int) {
+	if len(p.matchIndices) == 0 {
+		return 0, 0
+	}
+
+	p.currentMatch--
+	if p.currentMatch < 1 {
+		p.currentMatch = len(p.matchIndices)
+	}
+	p.jumpToMatch(p.currentMatch - 1)
+
+	return p.currentMatch, len(p.matchIndices)
+}
+
+// GetSearchInfo returns current match info
+func (p *Pane) GetSearchInfo() (current, total int) {
+	return p.currentMatch, len(p.matchIndices)
+}
+
+// jumpToMatch scrolls the viewport to show a match
+func (p *Pane) jumpToMatch(matchIdx int) {
+	if matchIdx < 0 || matchIdx >= len(p.matchIndices) {
+		return
+	}
+
+	lineIdx := p.matchIndices[matchIdx]
+
+	// Calculate the display line (accounting for word wrap)
+	displayLine := lineIdx
+	if p.wordWrap {
+		// In word wrap mode, we need to count wrapped lines
+		displayLine = 0
+		const timestampWidth = 9
+		contentWidth := p.Viewport.Width - timestampWidth - 1
+		if contentWidth < 10 {
+			contentWidth = 10
+		}
+		for i := 0; i < lineIdx && i < len(p.LogLines); i++ {
+			content := stripANSI(p.LogLines[i].Content)
+			lines := (len(content) + contentWidth - 1) / contentWidth
+			if lines < 1 {
+				lines = 1
+			}
+			displayLine += lines
+		}
+	}
+
+	// Center the match in the viewport
+	offset := displayLine - p.Viewport.Height/2
+	if offset < 0 {
+		offset = 0
+	}
+	p.Viewport.SetYOffset(offset)
+
+	// Re-render with highlighting
+	p.Viewport.SetContent(p.renderLogsWithSearch())
+}
+
+// renderLogsWithSearch renders log lines with search highlighting
+func (p *Pane) renderLogsWithSearch() string {
+	if len(p.LogLines) == 0 {
+		return common.SubtitleStyle.Render("Waiting for logs...")
+	}
+
+	if p.searchQuery == "" {
+		return p.renderLogs()
+	}
+
+	const timestampWidth = 9
+	contentWidth := p.Viewport.Width - timestampWidth - 1
+	if contentWidth < 10 {
+		contentWidth = 10
+	}
+
+	// Search highlight style
+	highlightStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("226")).
+		Foreground(lipgloss.Color("0")).
+		Bold(true)
+
+	// Current match style (different color)
+	currentHighlightStyle := lipgloss.NewStyle().
+		Background(lipgloss.Color("208")).
+		Foreground(lipgloss.Color("0")).
+		Bold(true)
+
+	queryLower := strings.ToLower(p.searchQuery)
+	currentMatchLine := -1
+	if p.currentMatch > 0 && p.currentMatch <= len(p.matchIndices) {
+		currentMatchLine = p.matchIndices[p.currentMatch-1]
+	}
+
+	var b strings.Builder
+
+	for lineIdx, line := range p.LogLines {
+		plainContent := stripANSI(line.Content)
+		isCurrentMatch := lineIdx == currentMatchLine
+		hasMatch := strings.Contains(strings.ToLower(plainContent), queryLower)
+
+		var content string
+		if hasMatch {
+			// Highlight matching portions
+			content = p.highlightMatches(plainContent, p.searchQuery, highlightStyle, currentHighlightStyle, isCurrentMatch)
+		} else {
+			// Apply normal styling
+			switch line.Stream {
+			case "stderr":
+				content = common.StderrStyle.Render(plainContent)
+			case "system":
+				content = common.SubtitleStyle.Render(plainContent)
+			default:
+				content = plainContent
+			}
+		}
+
+		if p.wordWrap {
+			// Word wrap the content (simplified - highlight before wrap)
+			wrappedLines := wrapText(content, contentWidth)
+			for i, wline := range wrappedLines {
+				var ts string
+				if i == 0 {
+					ts = common.TimestampStyle.Render(line.Timestamp.Format("15:04:05"))
+				} else {
+					ts = strings.Repeat(" ", 8)
+				}
+				b.WriteString(fmt.Sprintf("%s %s%s\n", ts, wline, ansiReset))
+			}
+		} else {
+			ts := common.TimestampStyle.Render(line.Timestamp.Format("15:04:05"))
+			b.WriteString(fmt.Sprintf("%s %s%s\n", ts, content, ansiReset))
+		}
+	}
+
+	return b.String()
+}
+
+// highlightMatches highlights all occurrences of query in text
+func (p *Pane) highlightMatches(text, query string, style, currentStyle lipgloss.Style, isCurrent bool) string {
+	if query == "" {
+		return text
+	}
+
+	queryLower := strings.ToLower(query)
+	textLower := strings.ToLower(text)
+	var result strings.Builder
+
+	lastEnd := 0
+	for {
+		idx := strings.Index(textLower[lastEnd:], queryLower)
+		if idx == -1 {
+			result.WriteString(text[lastEnd:])
+			break
+		}
+
+		// Add text before match
+		result.WriteString(text[lastEnd : lastEnd+idx])
+
+		// Add highlighted match
+		matchText := text[lastEnd+idx : lastEnd+idx+len(query)]
+		if isCurrent {
+			result.WriteString(currentStyle.Render(matchText))
+		} else {
+			result.WriteString(style.Render(matchText))
+		}
+
+		lastEnd = lastEnd + idx + len(query)
+	}
+
+	return result.String()
+}
+
+// wrapText wraps text to a given width (simple version)
+func wrapText(text string, width int) []string {
+	if width <= 0 {
+		return []string{text}
+	}
+
+	var lines []string
+	for len(text) > width {
+		lines = append(lines, text[:width])
+		text = text[width:]
+	}
+	if len(text) > 0 {
+		lines = append(lines, text)
+	}
+	if len(lines) == 0 {
+		lines = []string{""}
+	}
+	return lines
 }
 
 // SetSize updates the pane dimensions
@@ -197,6 +484,13 @@ func (p *Pane) SetWordWrap(enabled bool) {
 	p.wordWrap = enabled
 	p.xOffset = 0 // Reset horizontal scroll when toggling wrap
 	p.Viewport.SetContent(p.renderLogs())
+}
+
+// ClearLogs clears all log lines from the pane
+func (p *Pane) ClearLogs() {
+	p.LogLines = make([]docker.LogLine, 0, maxLogLines)
+	p.Viewport.SetContent(p.renderLogs())
+	p.Viewport.GotoTop()
 }
 
 // ScrollLeft scrolls the viewport left (for non-wrapped mode)
@@ -745,6 +1039,9 @@ func (p *Pane) View(width, height int, focused bool) (result string) {
 	title := p.Container.DisplayName()
 	if !p.Connected {
 		title += " (disconnected)"
+	}
+	if p.Paused {
+		title += " [PAUSED]"
 	}
 
 	// Status indicator based on container state

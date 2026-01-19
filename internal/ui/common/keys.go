@@ -54,6 +54,19 @@ type KeyMap struct {
 	CopyLogs      key.Binding
 	WordWrap      key.Binding
 	DebugToggle   key.Binding
+	ClearLogs     key.Binding
+	PauseLogs     key.Binding
+
+	// Pane shortcuts
+	Pane1 key.Binding
+	Pane2 key.Binding
+	Pane3 key.Binding
+	Pane4 key.Binding
+	Pane5 key.Binding
+	Pane6 key.Binding
+	Pane7 key.Binding
+	Pane8 key.Binding
+	Pane9 key.Binding
 }
 
 // parseKeys splits a comma-separated key string into a slice
@@ -112,11 +125,11 @@ func DefaultKeyMap() KeyMap {
 		),
 		NextPane: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.NextPane)...),
-			key.WithHelp("tab", "next pane"),
+			key.WithHelp("}", "next pane"),
 		),
 		PrevPane: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.PrevPane)...),
-			key.WithHelp("shift+tab", "prev pane"),
+			key.WithHelp("{", "prev pane"),
 		),
 
 		// Selection
@@ -225,6 +238,52 @@ func DefaultKeyMap() KeyMap {
 		DebugToggle: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.DebugToggle)...),
 			key.WithHelp("ctrl+g", "debug logs"),
+		),
+		ClearLogs: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ClearLogs)...),
+			key.WithHelp("ctrl+l", "clear logs"),
+		),
+		PauseLogs: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.PauseLogs)...),
+			key.WithHelp("P", "pause logs"),
+		),
+
+		// Pane shortcuts
+		Pane1: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane1)...),
+			key.WithHelp("1", "pane 1"),
+		),
+		Pane2: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane2)...),
+			key.WithHelp("2", "pane 2"),
+		),
+		Pane3: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane3)...),
+			key.WithHelp("3", "pane 3"),
+		),
+		Pane4: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane4)...),
+			key.WithHelp("4", "pane 4"),
+		),
+		Pane5: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane5)...),
+			key.WithHelp("5", "pane 5"),
+		),
+		Pane6: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane6)...),
+			key.WithHelp("6", "pane 6"),
+		),
+		Pane7: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane7)...),
+			key.WithHelp("7", "pane 7"),
+		),
+		Pane8: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane8)...),
+			key.WithHelp("8", "pane 8"),
+		),
+		Pane9: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.Pane9)...),
+			key.WithHelp("9", "pane 9"),
 		),
 	}
 }

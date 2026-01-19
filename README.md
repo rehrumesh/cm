@@ -15,8 +15,12 @@ A terminal UI application for monitoring Docker container logs in real-time with
 - **Real-time Streaming** - Logs stream in real-time with automatic scrolling
 - **Auto-Reconnect** - Automatically reconnects when containers restart externally (e.g., `docker compose restart`)
 - **Double-Click Maximize** - Double-click any pane to maximize/restore
-- **Container Actions** - Restart, rebuild, or down/up containers directly from the UI
+- **Container Actions** - Start, stop, restart, kill, or remove containers directly from the UI
 - **Shell Access** - Open an interactive shell in any running container
+- **Container Inspection** - View detailed container info (ports, env, volumes, networks)
+- **Log Search** - Search and filter logs with match highlighting and navigation
+- **Pause/Resume** - Pause log streaming while preserving incoming logs
+- **Help Modal** - Built-in keyboard shortcut reference
 - **Compose Integration** - Full Docker Compose support with project grouping
 - **Stopped Services** - Shows stopped Compose services that can be started
 
@@ -184,10 +188,14 @@ Navigate the container list and select containers to monitor:
 
 | Key | Action |
 |-----|--------|
-| `↑` / `↓` | Navigate list |
+| `↑` / `↓` / `j` / `k` | Navigate list |
 | `Space` | Toggle selection |
+| `a` / `A` | Select all / clear all |
 | `Enter` | Confirm and start monitoring |
-| `r` | Refresh container list |
+| `Ctrl+R` | Refresh container list |
+| `?` | Show keyboard shortcuts help |
+| `c` | Open configuration |
+| `p` | Saved projects |
 | `q` | Quit |
 
 ### Log View
@@ -197,15 +205,26 @@ Monitor logs from selected containers:
 | Key | Action |
 |-----|--------|
 | `↑` / `↓` / `j` / `k` | Scroll active pane |
-| `Tab` | Cycle between panes |
+| `{` / `}` | Previous/next pane |
 | `1-9` | Jump to specific pane |
+| `Enter` | Maximize/restore focused pane |
+| `/` | Search/filter logs |
+| `n` / `N` | Next/previous search match |
+| `i` | Inspect container details |
+| `P` | Pause/resume log streaming |
+| `Ctrl+L` | Clear logs in focused pane |
 | `r` | Restart focused container |
+| `u` / `s` | Start/stop container |
+| `K` | Kill container (force stop) |
+| `D` | Remove container |
 | `R` | Compose down/up focused service |
 | `b` | Build (no-cache) and up focused service |
 | `e` | Open shell in focused container |
 | `y` | Copy logs to clipboard |
 | `w` | Toggle word wrap |
-| `Esc` | Return to container selection |
+| `?` | Show keyboard shortcuts help |
+| `c` | Open configuration |
+| `Esc` | Close modal / un-maximize / go back |
 | `q` | Quit |
 
 | Mouse | Action |
@@ -255,7 +274,10 @@ cm/
         │   ├── styles.go        # UI styles (Lip Gloss)
         │   ├── toast.go         # Toast notification component
         │   ├── configmodal.go   # Configuration modal
-        │   └── savedprojects.go # Saved projects modal
+        │   ├── savedprojects.go # Saved projects modal
+        │   ├── helpmodal.go     # Keyboard shortcuts help modal
+        │   ├── inspectmodal.go  # Container inspection modal
+        │   └── searchmodal.go   # Log search/filter modal
         ├── discovery/
         │   └── model.go         # Container selection screen
         └── logview/

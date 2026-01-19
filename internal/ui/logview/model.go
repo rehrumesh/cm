@@ -43,6 +43,12 @@ type ContainerActionMsg struct {
 	Err         error
 }
 
+// ContainerRemovedMsg is sent when a container is successfully removed
+type ContainerRemovedMsg struct {
+	ContainerID string
+	Err         error
+}
+
 type ContainerActionStartMsg struct {
 	ContainerID string
 	Action      string
@@ -84,6 +90,15 @@ type Model struct {
 	// Config modal
 	configModal common.ConfigModal
 
+	// Help modal
+	helpModal common.HelpModal
+
+	// Inspect modal
+	inspectModal common.InspectModal
+
+	// Search modal
+	searchModal common.SearchModal
+
 	// Toast notifications
 	toast common.Toast
 
@@ -112,6 +127,9 @@ func New(containers []docker.Container, dockerClient *docker.Client, width, heig
 		lastWidth:     width,
 		lastHeight:    height,
 		configModal:   common.NewConfigModal(),
+		helpModal:     common.NewHelpModal(),
+		inspectModal:  common.NewInspectModal(),
+		searchModal:   common.NewSearchModal(),
 		toast:         common.NewToast(),
 		selection:     NewSelection(),
 	}
@@ -192,6 +210,33 @@ func (m Model) waitForError(containerID string, errChan <-chan error) tea.Cmd {
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
+
+	// Handle ContainerDetailsMsg even when inspect modal is visible
+	if detailsMsg, ok := msg.(common.ContainerDetailsMsg); ok {
+		m.inspectModal.SetDetails(detailsMsg.Details, detailsMsg.Err)
+		return m, nil
+	}
+
+	// Handle search modal messages first
+	if m.searchModal.IsVisible() {
+		var cmd tea.Cmd
+		m.searchModal, cmd = m.searchModal.Update(msg)
+		return m, cmd
+	}
+
+	// Handle inspect modal messages first
+	if m.inspectModal.IsVisible() {
+		var cmd tea.Cmd
+		m.inspectModal, cmd = m.inspectModal.Update(msg)
+		return m, cmd
+	}
+
+	// Handle help modal messages first
+	if m.helpModal.IsVisible() {
+		var cmd tea.Cmd
+		m.helpModal, cmd = m.helpModal.Update(msg)
+		return m, cmd
+	}
 
 	// Handle config modal messages first
 	if m.configModal.IsVisible() {
@@ -331,9 +376,19 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.NextPane):
 			m.focusNextPane()
+			// If maximized, show the newly focused pane
+			if m.maximizedPane != -1 {
+				m.maximizedPane = m.focusedPane
+				m.recalculateLayout()
+			}
 
 		case key.Matches(msg, m.keys.PrevPane):
 			m.focusPrevPane()
+			// If maximized, show the newly focused pane
+			if m.maximizedPane != -1 {
+				m.maximizedPane = m.focusedPane
+				m.recalculateLayout()
+			}
 
 		case key.Matches(msg, m.keys.Confirm):
 			// Toggle maximize on current pane
@@ -418,6 +473,36 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				cmds = append(cmds, m.restartContainer(pane.Container))
 			}
 
+		case key.Matches(msg, m.keys.Kill):
+			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
+				pane := &m.panes[m.focusedPane]
+				if pane.Container.State == "running" {
+					debug.Log("Kill requested for container: %s", pane.Container.DisplayName())
+					pane.AddLogLine(docker.LogLine{
+						ContainerID: pane.ID,
+						Timestamp:   time.Now(),
+						Stream:      "system",
+						Content:     "--- Killing container... ---",
+					})
+					cmds = append(cmds, m.killContainer(pane.Container))
+				} else {
+					cmds = append(cmds, m.toast.Show("Cannot kill", "Container not running", common.ToastError))
+				}
+			}
+
+		case key.Matches(msg, m.keys.Remove):
+			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
+				pane := &m.panes[m.focusedPane]
+				debug.Log("Remove requested for container: %s", pane.Container.DisplayName())
+				pane.AddLogLine(docker.LogLine{
+					ContainerID: pane.ID,
+					Timestamp:   time.Now(),
+					Stream:      "system",
+					Content:     "--- Removing container... ---",
+				})
+				cmds = append(cmds, m.removeContainer(pane.Container))
+			}
+
 		case key.Matches(msg, m.keys.ComposeRestart):
 			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
 				pane := &m.panes[m.focusedPane]
@@ -444,6 +529,23 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Config):
 			return m, m.configModal.Open()
+
+		case key.Matches(msg, m.keys.Help):
+			return m, m.helpModal.Open()
+
+		case key.Matches(msg, m.keys.Inspect):
+			paneIdx := m.focusedPane
+			if m.maximizedPane != -1 {
+				paneIdx = m.maximizedPane
+			}
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				pane := &m.panes[paneIdx]
+				m.inspectModal.Open(pane.Container.ID)
+				cmds = append(cmds, m.inspectContainer(pane.Container))
+			}
+
+		case key.Matches(msg, m.keys.Search):
+			return m, m.searchModal.Open()
 
 		case key.Matches(msg, m.keys.CopyLogs):
 			// Copy all logs from focused pane to clipboard
@@ -498,6 +600,106 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					cmds = append(cmds, m.toast.Show("Cannot exec", "Container not running", common.ToastError))
 				}
 			}
+
+		case key.Matches(msg, m.keys.ClearLogs):
+			// Clear logs from focused pane
+			paneIdx := m.focusedPane
+			if m.maximizedPane != -1 {
+				paneIdx = m.maximizedPane
+			}
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				m.panes[paneIdx].ClearLogs()
+				cmds = append(cmds, m.toast.Show("Cleared", m.panes[paneIdx].Container.DisplayName(), common.ToastSuccess))
+			}
+
+		case key.Matches(msg, m.keys.PauseLogs):
+			// Toggle pause on focused pane
+			paneIdx := m.focusedPane
+			if m.maximizedPane != -1 {
+				paneIdx = m.maximizedPane
+			}
+			if paneIdx >= 0 && paneIdx < len(m.panes) {
+				paused := m.panes[paneIdx].TogglePause()
+				status := "resumed"
+				if paused {
+					status = "paused"
+				}
+				cmds = append(cmds, m.toast.Show("Logs "+status, m.panes[paneIdx].Container.DisplayName(), common.ToastSuccess))
+			}
+
+		// Pane number shortcuts (1-9)
+		case key.Matches(msg, m.keys.Pane1):
+			if len(m.panes) >= 1 {
+				m.setFocus(0)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 0
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane2):
+			if len(m.panes) >= 2 {
+				m.setFocus(1)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 1
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane3):
+			if len(m.panes) >= 3 {
+				m.setFocus(2)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 2
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane4):
+			if len(m.panes) >= 4 {
+				m.setFocus(3)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 3
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane5):
+			if len(m.panes) >= 5 {
+				m.setFocus(4)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 4
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane6):
+			if len(m.panes) >= 6 {
+				m.setFocus(5)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 5
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane7):
+			if len(m.panes) >= 7 {
+				m.setFocus(6)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 6
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane8):
+			if len(m.panes) >= 8 {
+				m.setFocus(7)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 7
+					m.recalculateLayout()
+				}
+			}
+		case key.Matches(msg, m.keys.Pane9):
+			if len(m.panes) >= 9 {
+				m.setFocus(8)
+				if m.maximizedPane != -1 {
+					m.maximizedPane = 8
+					m.recalculateLayout()
+				}
+			}
 		}
 
 	case ContainerActionMsg:
@@ -525,6 +727,107 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					cmds = append(cmds, m.restartLogStream(m.panes[i].Container))
 				}
 				break
+			}
+		}
+
+	case common.SearchModalClosedMsg:
+		// Apply search to focused pane
+		paneIdx := m.focusedPane
+		if m.maximizedPane != -1 {
+			paneIdx = m.maximizedPane
+		}
+		if paneIdx >= 0 && paneIdx < len(m.panes) {
+			matchCount := m.panes[paneIdx].SetSearch(msg.Query)
+			if msg.Query != "" {
+				m.searchModal.SetMatchInfo(1, matchCount)
+			}
+		}
+		return m, nil
+
+	case common.SearchNextMsg:
+		paneIdx := m.focusedPane
+		if m.maximizedPane != -1 {
+			paneIdx = m.maximizedPane
+		}
+		if paneIdx >= 0 && paneIdx < len(m.panes) {
+			current, total := m.panes[paneIdx].NextMatch()
+			m.searchModal.SetMatchInfo(current, total)
+		}
+		return m, nil
+
+	case common.SearchPrevMsg:
+		paneIdx := m.focusedPane
+		if m.maximizedPane != -1 {
+			paneIdx = m.maximizedPane
+		}
+		if paneIdx >= 0 && paneIdx < len(m.panes) {
+			current, total := m.panes[paneIdx].PrevMatch()
+			m.searchModal.SetMatchInfo(current, total)
+		}
+		return m, nil
+
+	case common.SearchClearMsg:
+		paneIdx := m.focusedPane
+		if m.maximizedPane != -1 {
+			paneIdx = m.maximizedPane
+		}
+		if paneIdx >= 0 && paneIdx < len(m.panes) {
+			m.panes[paneIdx].ClearSearch()
+		}
+		return m, nil
+
+	case ContainerRemovedMsg:
+		// Handle container removal
+		if msg.Err != nil {
+			for i := range m.panes {
+				if m.panes[i].ID == msg.ContainerID {
+					m.panes[i].AddLogLine(docker.LogLine{
+						ContainerID: msg.ContainerID,
+						Timestamp:   time.Now(),
+						Stream:      "stderr",
+						Content:     fmt.Sprintf("--- Remove failed: %v ---", msg.Err),
+					})
+					cmds = append(cmds, m.toast.Show("Remove Failed", m.panes[i].Container.DisplayName(), common.ToastError))
+					break
+				}
+			}
+		} else {
+			// Find and remove the pane
+			var containerName string
+			paneIdx := -1
+			for i := range m.panes {
+				if m.panes[i].ID == msg.ContainerID {
+					containerName = m.panes[i].Container.DisplayName()
+					paneIdx = i
+					// Clean up stream reference
+					delete(m.streams, msg.ContainerID)
+					break
+				}
+			}
+			if paneIdx >= 0 {
+				// Remove pane from slice
+				m.panes = append(m.panes[:paneIdx], m.panes[paneIdx+1:]...)
+				// Recalculate layout
+				m.layout = CalculateLayout(len(m.panes))
+				// Adjust focused pane if needed
+				if m.focusedPane >= len(m.panes) {
+					m.focusedPane = len(m.panes) - 1
+				}
+				if m.focusedPane < 0 {
+					m.focusedPane = 0
+				}
+				// Reset maximized pane if it was the removed one
+				if m.maximizedPane == paneIdx {
+					m.maximizedPane = -1
+				} else if m.maximizedPane > paneIdx {
+					m.maximizedPane--
+				}
+				// Update focus states
+				for i := range m.panes {
+					m.panes[i].Active = (i == m.focusedPane)
+				}
+				m.recalculateLayout()
+				cmds = append(cmds, m.toast.Show("Removed", containerName, common.ToastSuccess))
 			}
 		}
 
@@ -995,6 +1298,26 @@ func (m Model) View() (result string) {
 		content = m.renderTiledView()
 	}
 
+	// Overlay inspect modal if visible
+	if m.inspectModal.IsVisible() {
+		modalView := m.inspectModal.View(m.width, m.height)
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Left, lipgloss.Top,
+			content,
+			lipgloss.WithWhitespaceChars(" "),
+		) + "\n" + modalView
+	}
+
+	// Overlay help modal if visible
+	if m.helpModal.IsVisible() {
+		modalView := m.helpModal.View(m.width, m.height)
+		return lipgloss.Place(m.width, m.height,
+			lipgloss.Left, lipgloss.Top,
+			content,
+			lipgloss.WithWhitespaceChars(" "),
+		) + "\n" + modalView
+	}
+
 	// Overlay config modal if visible
 	if m.configModal.IsVisible() {
 		modalView := m.configModal.View(m.width, m.height)
@@ -1003,6 +1326,12 @@ func (m Model) View() (result string) {
 			content,
 			lipgloss.WithWhitespaceChars(" "),
 		) + "\n" + modalView
+	}
+
+	// Overlay search modal if visible
+	if m.searchModal.IsVisible() {
+		modalView := m.searchModal.View(m.width, m.height)
+		content = lipgloss.JoinVertical(lipgloss.Left, content, modalView)
 	}
 
 	// Overlay toast notification if visible
@@ -1200,26 +1529,26 @@ func (m Model) renderHelpBar() string {
 		// Maximized pane view
 		help = " " + key("r") + desc(":restart") +
 			desc("  ") + key("R") + desc(":down/up") +
-			desc("  ") + key("b") + desc(":build") +
 			desc("  ") + key("e") + desc(":shell") +
+			desc("  ") + key("i") + desc(":inspect") +
+			desc("  ") + key("/") + desc(":search") +
+			desc("  ") + key("P") + desc(":pause") +
 			desc("  ") + key("↑↓←→") + desc(":scroll") +
 			desc("  ") + key("y") + desc(":copy") +
-			desc("  ") + key("w") + desc(":wrap") +
-			desc("  ") + key("c") + desc(":config") +
-			desc("  ") + key("ctrl+g") + desc(":debug") +
+			desc("  ") + key("?") + desc(":help") +
 			desc("  ") + key("esc") + desc(":min") +
 			desc("  ") + key("q") + desc(":quit")
 	} else {
 		// Tiled panes view
 		help = " " + key("r") + desc(":restart") +
 			desc("  ") + key("R") + desc(":down/up") +
-			desc("  ") + key("b") + desc(":build") +
 			desc("  ") + key("e") + desc(":shell") +
+			desc("  ") + key("i") + desc(":inspect") +
+			desc("  ") + key("/") + desc(":search") +
+			desc("  ") + key("P") + desc(":pause") +
 			desc("  ") + key("←↑↓→") + desc(":nav") +
 			desc("  ") + key("y") + desc(":copy") +
-			desc("  ") + key("w") + desc(":wrap") +
-			desc("  ") + key("c") + desc(":config") +
-			desc("  ") + key("ctrl+g") + desc(":debug") +
+			desc("  ") + key("?") + desc(":help") +
 			desc("  ") + key("esc") + desc(":back") +
 			desc("  ") + key("q") + desc(":quit")
 	}
@@ -1242,6 +1571,40 @@ func (m Model) restartContainer(cont docker.Container) tea.Cmd {
 			ContainerID: cont.ID,
 			Action:      "Restart",
 			Err:         err,
+		}
+	}
+}
+
+// killContainer forcefully kills a container
+func (m Model) killContainer(cont docker.Container) tea.Cmd {
+	return func() tea.Msg {
+		err := m.dockerClient.KillContainer(m.ctx, cont.ID)
+		return ContainerActionMsg{
+			ContainerID: cont.ID,
+			Action:      "Kill",
+			Err:         err,
+		}
+	}
+}
+
+// removeContainer removes a container
+func (m Model) removeContainer(cont docker.Container) tea.Cmd {
+	return func() tea.Msg {
+		err := m.dockerClient.RemoveContainer(m.ctx, cont.ID)
+		return ContainerRemovedMsg{
+			ContainerID: cont.ID,
+			Err:         err,
+		}
+	}
+}
+
+// inspectContainer fetches container details
+func (m Model) inspectContainer(cont docker.Container) tea.Cmd {
+	return func() tea.Msg {
+		details, err := m.dockerClient.InspectContainer(m.ctx, cont.ID)
+		return common.ContainerDetailsMsg{
+			Details: details,
+			Err:     err,
 		}
 	}
 }

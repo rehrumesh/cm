@@ -385,6 +385,86 @@ func (c *Client) KillContainer(ctx context.Context, containerID string) error {
 	return c.cli.ContainerKill(ctx, containerID, "SIGKILL")
 }
 
+// RemoveContainer removes a container (force removes if running)
+func (c *Client) RemoveContainer(ctx context.Context, containerID string) error {
+	return c.cli.ContainerRemove(ctx, containerID, container.RemoveOptions{Force: true})
+}
+
+// InspectContainer returns detailed information about a container
+func (c *Client) InspectContainer(ctx context.Context, containerID string) (*ContainerDetails, error) {
+	info, err := c.cli.ContainerInspect(ctx, containerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to inspect container: %w", err)
+	}
+
+	details := &ContainerDetails{
+		ID:     info.ID[:12],
+		Name:   strings.TrimPrefix(info.Name, "/"),
+		Image:  info.Config.Image,
+		Status: info.State.Status,
+		State:  info.State.Status,
+		Labels: info.Config.Labels,
+	}
+
+	// Parse created time
+	if created, err := time.Parse(time.RFC3339Nano, info.Created); err == nil {
+		details.Created = created
+	}
+
+	// Parse started time
+	if info.State.StartedAt != "" {
+		if started, err := time.Parse(time.RFC3339Nano, info.State.StartedAt); err == nil {
+			details.Started = started
+		}
+	}
+
+	// Get port mappings
+	for port, bindings := range info.NetworkSettings.Ports {
+		for _, binding := range bindings {
+			details.Ports = append(details.Ports, fmt.Sprintf("%s:%s->%s", binding.HostIP, binding.HostPort, port))
+		}
+	}
+
+	// Get environment variables (filter sensitive ones)
+	for _, env := range info.Config.Env {
+		// Skip common sensitive environment variables
+		lower := strings.ToLower(env)
+		if strings.Contains(lower, "password") || strings.Contains(lower, "secret") ||
+			strings.Contains(lower, "token") || strings.Contains(lower, "key") ||
+			strings.Contains(lower, "credential") {
+			parts := strings.SplitN(env, "=", 2)
+			if len(parts) == 2 {
+				details.Env = append(details.Env, parts[0]+"=<redacted>")
+			}
+		} else {
+			details.Env = append(details.Env, env)
+		}
+	}
+
+	// Get volume mounts
+	for _, mount := range info.Mounts {
+		details.Volumes = append(details.Volumes, fmt.Sprintf("%s:%s", mount.Source, mount.Destination))
+	}
+
+	// Get networks
+	for name := range info.NetworkSettings.Networks {
+		details.Networks = append(details.Networks, name)
+	}
+
+	// Command and entrypoint
+	if len(info.Config.Cmd) > 0 {
+		details.Command = strings.Join(info.Config.Cmd, " ")
+	}
+	if len(info.Config.Entrypoint) > 0 {
+		details.Entrypoint = strings.Join(info.Config.Entrypoint, " ")
+	}
+
+	details.WorkingDir = info.Config.WorkingDir
+	details.RestartPolicy = string(info.HostConfig.RestartPolicy.Name)
+
+	return details, nil
+}
+
 // RestartContainer restarts a container
 func (c *Client) RestartContainer(ctx context.Context, containerID string) error {
 	timeout := 10 // seconds
