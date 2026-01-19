@@ -285,6 +285,41 @@ func (p *Pane) GetSearchInfo() (current, total int) {
 	return p.currentMatch, len(p.matchIndices)
 }
 
+// HasMatches returns true if this pane has search matches
+func (p *Pane) HasMatches() bool {
+	return len(p.matchIndices) > 0
+}
+
+// IsAtLastMatch returns true if currently at the last match
+func (p *Pane) IsAtLastMatch() bool {
+	return p.currentMatch >= len(p.matchIndices)
+}
+
+// IsAtFirstMatch returns true if currently at the first match
+func (p *Pane) IsAtFirstMatch() bool {
+	return p.currentMatch <= 1
+}
+
+// JumpToFirstMatch jumps to the first match and returns match info
+func (p *Pane) JumpToFirstMatch() (current, total int) {
+	if len(p.matchIndices) == 0 {
+		return 0, 0
+	}
+	p.currentMatch = 1
+	p.jumpToMatch(0)
+	return p.currentMatch, len(p.matchIndices)
+}
+
+// JumpToLastMatch jumps to the last match and returns match info
+func (p *Pane) JumpToLastMatch() (current, total int) {
+	if len(p.matchIndices) == 0 {
+		return 0, 0
+	}
+	p.currentMatch = len(p.matchIndices)
+	p.jumpToMatch(p.currentMatch - 1)
+	return p.currentMatch, len(p.matchIndices)
+}
+
 // jumpToMatch scrolls the viewport to show a match
 func (p *Pane) jumpToMatch(matchIdx int) {
 	if matchIdx < 0 || matchIdx >= len(p.matchIndices) {

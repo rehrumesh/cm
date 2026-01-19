@@ -741,10 +741,32 @@ func (m Model) renderHelpBar() string {
 		k("ctrl+g") + d(":debug logs ") +
 		k("q") + d(":quit")
 
+	// Debug indicator on the right
+	var debugIndicator string
+	if debug.IsEnabled() {
+		debugIndicator = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("208")).
+			Bold(true).
+			Render("[DEBUG]")
+	}
+
 	width := m.width
 	if width <= 0 {
 		width = 80
 	}
+
+	// If debug is enabled, create a two-column layout with help on left and debug on right
+	if debugIndicator != "" {
+		helpWidth := lipgloss.Width(help)
+		debugWidth := lipgloss.Width(debugIndicator)
+		padding := width - helpWidth - debugWidth - 1
+		if padding > 0 {
+			help = help + strings.Repeat(" ", padding) + debugIndicator
+		} else {
+			help = help + " " + debugIndicator
+		}
+	}
+
 	return common.HelpBarStyle.Width(width).Render(help)
 }
 

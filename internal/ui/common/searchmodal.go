@@ -130,55 +130,52 @@ func (m SearchModal) Update(msg tea.Msg) (SearchModal, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// View renders the modal
+// View renders the search bar (single line, positioned at top like Tempo's filter)
 func (m SearchModal) View(screenWidth, screenHeight int) string {
 	if !m.visible {
 		return ""
 	}
 
-	var content strings.Builder
+	// Build the search bar content
+	var parts []string
 
-	// Search input with styling
-	inputStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("117")).
-		Padding(0, 1)
+	// Search prefix indicator (like Tempo's "/")
+	prefix := lipgloss.NewStyle().
+		Foreground(lipgloss.Color("117")).
+		Bold(true).
+		Render("/")
+	parts = append(parts, prefix)
 
-	content.WriteString(inputStyle.Render(m.input.View()))
-	content.WriteString("  ")
+	// Search input
+	parts = append(parts, m.input.View())
 
-	// Match count
+	// Match count (if searching)
 	if m.input.Value() != "" {
 		if m.matchCount > 0 {
-			content.WriteString(lipgloss.NewStyle().
+			matchInfo := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("252")).
-				Render(fmt.Sprintf("%d/%d", m.currentMatch, m.matchCount)))
+				Render(fmt.Sprintf(" %d/%d", m.currentMatch, m.matchCount))
+			parts = append(parts, matchInfo)
 		} else {
-			content.WriteString(lipgloss.NewStyle().
+			noMatch := lipgloss.NewStyle().
 				Foreground(lipgloss.Color("196")).
-				Render("No matches"))
+				Render(" No matches")
+			parts = append(parts, noMatch)
 		}
 	}
 
-	content.WriteString("  ")
-	content.WriteString(MutedInlineStyle.Render("enter:confirm esc:clear"))
+	// Help text (right-aligned)
+	helpText := MutedInlineStyle.Render("  enter:confirm esc:clear ctrl+n/p:next/prev")
+	parts = append(parts, helpText)
 
-	// Style the modal (minimal, bar-like at bottom)
-	modalContent := lipgloss.NewStyle().
+	content := strings.Join(parts, "")
+
+	// Style the entire bar
+	barStyle := lipgloss.NewStyle().
 		Background(lipgloss.Color("236")).
 		Foreground(lipgloss.Color("252")).
 		Padding(0, 1).
-		Render(content.String())
+		Width(screenWidth)
 
-	// Position at bottom
-	y := screenHeight - 2
-	if y < 0 {
-		y = 0
-	}
-
-	positioned := lipgloss.NewStyle().
-		MarginTop(y).
-		Render(modalContent)
-
-	return positioned
+	return barStyle.Render(content)
 }

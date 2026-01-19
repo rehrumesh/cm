@@ -97,7 +97,8 @@ type Model struct {
 	inspectModal common.InspectModal
 
 	// Search modal
-	searchModal common.SearchModal
+	searchModal   common.SearchModal
+	searchPaneIdx int // tracks which pane we're navigating in during search (tiled view)
 
 	// Toast notifications
 	toast common.Toast
@@ -231,7 +232,81 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, nil
 	}
 
-	// Handle search modal messages first
+	// Handle search-related messages even when search modal is visible
+	switch searchMsg := msg.(type) {
+	case common.SearchModalClosedMsg:
+		if m.maximizedPane != -1 {
+			// Maximized view: search only the maximized pane
+			if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+				matchCount := m.panes[m.maximizedPane].SetSearch(searchMsg.Query)
+				if searchMsg.Query != "" {
+					m.searchModal.SetMatchInfo(1, matchCount)
+					debug.Log("Search '%s' in maximized pane %d: %d matches", searchMsg.Query, m.maximizedPane, matchCount)
+				}
+			}
+		} else {
+			// Tiled view: search all panes
+			totalMatches := 0
+			for i := range m.panes {
+				matchCount := m.panes[i].SetSearch(searchMsg.Query)
+				if searchMsg.Query != "" && matchCount > 0 {
+					debug.Log("Search '%s' in pane %d (%s): %d matches", searchMsg.Query, i, m.panes[i].Container.DisplayName(), matchCount)
+				}
+				totalMatches += matchCount
+			}
+			if searchMsg.Query != "" {
+				m.searchModal.SetMatchInfo(1, totalMatches)
+				debug.Log("Search '%s' total: %d matches across %d panes", searchMsg.Query, totalMatches, len(m.panes))
+			}
+		}
+		return m, nil
+
+	case common.SearchNextMsg:
+		if m.maximizedPane != -1 {
+			// Maximized view: navigate within the maximized pane only
+			if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+				current, total := m.panes[m.maximizedPane].NextMatch()
+				m.searchModal.SetMatchInfo(current, total)
+			}
+		} else {
+			// Tiled view: navigate across all panes
+			current, total := m.searchNextAcrossPanes()
+			m.searchModal.SetMatchInfo(current, total)
+		}
+		return m, nil
+
+	case common.SearchPrevMsg:
+		if m.maximizedPane != -1 {
+			// Maximized view: navigate within the maximized pane only
+			if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+				current, total := m.panes[m.maximizedPane].PrevMatch()
+				m.searchModal.SetMatchInfo(current, total)
+			}
+		} else {
+			// Tiled view: navigate across all panes
+			current, total := m.searchPrevAcrossPanes()
+			m.searchModal.SetMatchInfo(current, total)
+		}
+		return m, nil
+
+	case common.SearchClearMsg:
+		if m.maximizedPane != -1 {
+			// Maximized view: clear only the maximized pane
+			if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+				m.panes[m.maximizedPane].ClearSearch()
+				debug.Log("Search cleared in maximized pane %d", m.maximizedPane)
+			}
+		} else {
+			// Tiled view: clear all panes
+			for i := range m.panes {
+				m.panes[i].ClearSearch()
+			}
+			debug.Log("Search cleared in all %d panes", len(m.panes))
+		}
+		return m, nil
+	}
+
+	// Handle search modal input
 	if m.searchModal.IsVisible() {
 		var cmd tea.Cmd
 		m.searchModal, cmd = m.searchModal.Update(msg)
@@ -766,52 +841,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 
-	case common.SearchModalClosedMsg:
-		// Apply search to focused pane
-		paneIdx := m.focusedPane
-		if m.maximizedPane != -1 {
-			paneIdx = m.maximizedPane
-		}
-		if paneIdx >= 0 && paneIdx < len(m.panes) {
-			matchCount := m.panes[paneIdx].SetSearch(msg.Query)
-			if msg.Query != "" {
-				m.searchModal.SetMatchInfo(1, matchCount)
-			}
-		}
-		return m, nil
-
-	case common.SearchNextMsg:
-		paneIdx := m.focusedPane
-		if m.maximizedPane != -1 {
-			paneIdx = m.maximizedPane
-		}
-		if paneIdx >= 0 && paneIdx < len(m.panes) {
-			current, total := m.panes[paneIdx].NextMatch()
-			m.searchModal.SetMatchInfo(current, total)
-		}
-		return m, nil
-
-	case common.SearchPrevMsg:
-		paneIdx := m.focusedPane
-		if m.maximizedPane != -1 {
-			paneIdx = m.maximizedPane
-		}
-		if paneIdx >= 0 && paneIdx < len(m.panes) {
-			current, total := m.panes[paneIdx].PrevMatch()
-			m.searchModal.SetMatchInfo(current, total)
-		}
-		return m, nil
-
-	case common.SearchClearMsg:
-		paneIdx := m.focusedPane
-		if m.maximizedPane != -1 {
-			paneIdx = m.maximizedPane
-		}
-		if paneIdx >= 0 && paneIdx < len(m.panes) {
-			m.panes[paneIdx].ClearSearch()
-		}
-		return m, nil
-
 	case ContainerRemovedMsg:
 		// Handle container removal
 		if msg.Err != nil {
@@ -1323,30 +1352,49 @@ func (m Model) View() (result string) {
 
 	var content string
 
+	// Create search bar if visible (rendered at top like Tempo)
+	var searchBar string
+	if m.searchModal.IsVisible() {
+		searchBar = m.searchModal.View(m.width, m.height)
+	}
+
 	// Create tutorial hint bar if active
 	var tutorialBar string
 	if m.tutorial.Active && m.tutorial.IsLogViewStep() {
 		tutorialBar = m.tutorial.View(m.width)
 	}
 
+	// Calculate height reduction for search bar
+	searchBarHeight := 0
+	if searchBar != "" {
+		searchBarHeight = 1
+	}
+
 	// Maximized view
 	if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
-		// Calculate height: subtract help bar (1 line) and tutorial bar (1 line if active)
-		paneHeight := m.height - 1
+		// Calculate height: subtract help bar (1 line), tutorial bar (1 line if active), and search bar (1 line if active)
+		paneHeight := m.height - 1 - searchBarHeight
 		if tutorialBar != "" {
 			paneHeight--
 		}
 		pane := m.panes[m.maximizedPane]
 		paneView := pane.View(m.width, paneHeight, true)
 		helpBar := m.renderHelpBar()
-		if tutorialBar != "" {
-			content = lipgloss.JoinVertical(lipgloss.Left, paneView, tutorialBar, helpBar)
-		} else {
-			content = lipgloss.JoinVertical(lipgloss.Left, paneView, helpBar)
+
+		// Build content with search bar at top
+		var parts []string
+		if searchBar != "" {
+			parts = append(parts, searchBar)
 		}
+		parts = append(parts, paneView)
+		if tutorialBar != "" {
+			parts = append(parts, tutorialBar)
+		}
+		parts = append(parts, helpBar)
+		content = lipgloss.JoinVertical(lipgloss.Left, parts...)
 	} else {
-		// Tiled view
-		content = m.renderTiledView()
+		// Tiled view (pass search bar height for proper calculation)
+		content = m.renderTiledViewWithSearch(searchBar)
 	}
 
 	// Overlay inspect modal if visible
@@ -1377,12 +1425,6 @@ func (m Model) View() (result string) {
 			content,
 			lipgloss.WithWhitespaceChars(" "),
 		) + "\n" + modalView
-	}
-
-	// Overlay search modal if visible
-	if m.searchModal.IsVisible() {
-		modalView := m.searchModal.View(m.width, m.height)
-		content = lipgloss.JoinVertical(lipgloss.Left, content, modalView)
 	}
 
 	// Overlay toast notification if visible
@@ -1501,6 +1543,10 @@ func truncateWithAnsi(s string, width int) string {
 }
 
 func (m Model) renderTiledView() string {
+	return m.renderTiledViewWithSearch("")
+}
+
+func (m Model) renderTiledViewWithSearch(searchBar string) string {
 	// Safety checks to prevent panics
 	if m.layout.Cols <= 0 || m.layout.Rows <= 0 || len(m.panes) == 0 {
 		return m.renderHelpBar()
@@ -1512,9 +1558,15 @@ func (m Model) renderTiledView() string {
 	// Check if tutorial bar is active
 	hasTutorialBar := m.tutorial.Active && m.tutorial.IsLogViewStep()
 
-	// Reserve 1 line for help bar (+ 1 for tutorial bar if active)
+	// Check if search bar is active
+	hasSearchBar := searchBar != ""
+
+	// Reserve 1 line for help bar (+ 1 for tutorial bar if active, + 1 for search bar if active)
 	availableHeight := m.height - 1
 	if hasTutorialBar {
+		availableHeight--
+	}
+	if hasSearchBar {
 		availableHeight--
 	}
 	if availableHeight < 1 {
@@ -1537,6 +1589,11 @@ func (m Model) renderTiledView() string {
 	}
 
 	var rows []string
+
+	// Add search bar at the top if active
+	if hasSearchBar {
+		rows = append(rows, searchBar)
+	}
 
 	for rowIdx := 0; rowIdx < m.layout.Rows; rowIdx++ {
 		// Distribute extra height to first rows
@@ -1616,7 +1673,130 @@ func (m Model) renderHelpBar() string {
 			desc("  ") + key("q") + desc(":quit")
 	}
 
+	// Debug indicator on the right
+	var debugIndicator string
+	if debug.IsEnabled() {
+		debugIndicator = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("208")).
+			Bold(true).
+			Render("[DEBUG]")
+	}
+
+	// If debug is enabled, add it to the right side
+	if debugIndicator != "" {
+		helpWidth := lipgloss.Width(help)
+		debugWidth := lipgloss.Width(debugIndicator)
+		padding := m.width - helpWidth - debugWidth - 1
+		if padding > 0 {
+			help = help + strings.Repeat(" ", padding) + debugIndicator
+		} else {
+			help = help + " " + debugIndicator
+		}
+	}
+
 	return common.HelpBarStyle.Width(m.width).Render(help)
+}
+
+// searchNextAcrossPanes navigates to the next match across all panes in tiled view
+func (m *Model) searchNextAcrossPanes() (current, total int) {
+	if len(m.panes) == 0 {
+		return 0, 0
+	}
+
+	// Calculate total matches across all panes
+	total = 0
+	for i := range m.panes {
+		_, t := m.panes[i].GetSearchInfo()
+		total += t
+	}
+	if total == 0 {
+		return 0, 0
+	}
+
+	// Ensure searchPaneIdx is valid
+	if m.searchPaneIdx < 0 || m.searchPaneIdx >= len(m.panes) {
+		m.searchPaneIdx = 0
+	}
+
+	// Try to advance within current pane
+	if m.panes[m.searchPaneIdx].HasMatches() && !m.panes[m.searchPaneIdx].IsAtLastMatch() {
+		m.panes[m.searchPaneIdx].NextMatch()
+		pos := m.calculateGlobalMatchPosition()
+		debug.Log("Search next: pane %d (%s), match %d/%d", m.searchPaneIdx, m.panes[m.searchPaneIdx].Container.DisplayName(), pos, total)
+		return pos, total
+	}
+
+	// Move to next pane with matches
+	startPane := m.searchPaneIdx
+	for i := 1; i <= len(m.panes); i++ {
+		nextPane := (startPane + i) % len(m.panes)
+		if m.panes[nextPane].HasMatches() {
+			m.searchPaneIdx = nextPane
+			m.panes[nextPane].JumpToFirstMatch()
+			pos := m.calculateGlobalMatchPosition()
+			debug.Log("Search next: jumped to pane %d (%s), match %d/%d", nextPane, m.panes[nextPane].Container.DisplayName(), pos, total)
+			return pos, total
+		}
+	}
+
+	return 0, total
+}
+
+// searchPrevAcrossPanes navigates to the previous match across all panes in tiled view
+func (m *Model) searchPrevAcrossPanes() (current, total int) {
+	if len(m.panes) == 0 {
+		return 0, 0
+	}
+
+	// Calculate total matches across all panes
+	total = 0
+	for i := range m.panes {
+		_, t := m.panes[i].GetSearchInfo()
+		total += t
+	}
+	if total == 0 {
+		return 0, 0
+	}
+
+	// Ensure searchPaneIdx is valid
+	if m.searchPaneIdx < 0 || m.searchPaneIdx >= len(m.panes) {
+		m.searchPaneIdx = 0
+	}
+
+	// Try to go back within current pane
+	if m.panes[m.searchPaneIdx].HasMatches() && !m.panes[m.searchPaneIdx].IsAtFirstMatch() {
+		m.panes[m.searchPaneIdx].PrevMatch()
+		pos := m.calculateGlobalMatchPosition()
+		debug.Log("Search prev: pane %d (%s), match %d/%d", m.searchPaneIdx, m.panes[m.searchPaneIdx].Container.DisplayName(), pos, total)
+		return pos, total
+	}
+
+	// Move to previous pane with matches
+	startPane := m.searchPaneIdx
+	for i := 1; i <= len(m.panes); i++ {
+		prevPane := (startPane - i + len(m.panes)) % len(m.panes)
+		if m.panes[prevPane].HasMatches() {
+			m.searchPaneIdx = prevPane
+			m.panes[prevPane].JumpToLastMatch()
+			pos := m.calculateGlobalMatchPosition()
+			debug.Log("Search prev: jumped to pane %d (%s), match %d/%d", prevPane, m.panes[prevPane].Container.DisplayName(), pos, total)
+			return pos, total
+		}
+	}
+
+	return 0, total
+}
+
+// calculateGlobalMatchPosition calculates the current match position across all panes
+func (m *Model) calculateGlobalMatchPosition() int {
+	position := 0
+	for i := 0; i < m.searchPaneIdx; i++ {
+		_, t := m.panes[i].GetSearchInfo()
+		position += t
+	}
+	c, _ := m.panes[m.searchPaneIdx].GetSearchInfo()
+	position += c
+	return position
 }
 
 // Cleanup cancels any running goroutines
