@@ -137,6 +137,11 @@ func New(containers []docker.Container, dockerClient *docker.Client, width, heig
 	// Calculate layout
 	m.layout = CalculateLayout(len(containers))
 
+	// Early return if no containers to avoid divide by zero
+	if len(containers) == 0 {
+		return m
+	}
+
 	// Reserve 1 line for help bar
 	availableHeight := height - 1
 
