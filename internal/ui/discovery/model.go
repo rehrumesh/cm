@@ -44,20 +44,21 @@ type actionStartedMsg struct {
 
 // Model represents the container discovery screen
 type Model struct {
-	groups        []docker.ContainerGroup
-	flatList      []listItem
-	cursor        int
-	selected      map[string]bool
-	width, height int
-	ready         bool
-	err           error
-	keys          common.KeyMap
-	dockerClient  *docker.Client
-	actionStatus  string
-	actionRunning bool
-	configModal   common.ConfigModal
-	savedProjectsModal    common.SavedProjectsModal
-	toast         common.Toast
+	groups             []docker.ContainerGroup
+	flatList           []listItem
+	cursor             int
+	selected           map[string]bool
+	width, height      int
+	ready              bool
+	err                error
+	keys               common.KeyMap
+	dockerClient       *docker.Client
+	actionStatus       string
+	actionRunning      bool
+	configModal        common.ConfigModal
+	savedProjectsModal common.SavedProjectsModal
+	toast              common.Toast
+	tutorial           common.Tutorial
 }
 
 type listItem struct {
@@ -83,12 +84,13 @@ func New(dockerClient *docker.Client, initialSelection []docker.Container) Model
 		selected[selectionKey(c)] = true
 	}
 	return Model{
-		selected:     selected,
-		keys:         common.DefaultKeyMap(),
-		dockerClient: dockerClient,
-		configModal:  common.NewConfigModal(),
-		savedProjectsModal:   common.NewSavedProjectsModal(),
-		toast:        common.NewToast(),
+		selected:           selected,
+		keys:               common.DefaultKeyMap(),
+		dockerClient:       dockerClient,
+		configModal:        common.NewConfigModal(),
+		savedProjectsModal: common.NewSavedProjectsModal(),
+		toast:              common.NewToast(),
+		tutorial:           common.NewTutorial(),
 	}
 }
 
@@ -175,6 +177,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 		}
+		// Start tutorial if there are containers
+		m.tutorial.StartIfReady(len(m.flatList) > 0)
 		return m, tea.Tick(5*time.Second, func(t time.Time) tea.Msg {
 			return autoRefreshTickMsg{}
 		})
@@ -213,12 +217,43 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 
+		// Handle tutorial intro modal - only allow enter to start or 's' to skip
+		if m.tutorial.IsIntroStep() {
+			if key.Matches(msg, m.keys.Confirm) {
+				m.tutorial.Advance()
+				return m, nil
+			}
+			if msg.String() == "s" {
+				m.tutorial.Skip()
+				return m, nil
+			}
+			if key.Matches(msg, m.keys.Quit) {
+				return m, tea.Quit
+			}
+			// Block all other keys during intro modal
+			return m, nil
+		}
+
+		// Handle tutorial skip with 's' when tutorial is active
+		if m.tutorial.Active && msg.String() == "s" {
+			m.tutorial.Skip()
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Up):
 			m.moveCursor(-1)
+			// Advance tutorial if on navigate step
+			if m.tutorial.Active && m.tutorial.Step == common.TutorialStepNavigate {
+				m.tutorial.Advance()
+			}
 
 		case key.Matches(msg, m.keys.Down):
 			m.moveCursor(1)
+			// Advance tutorial if on navigate step
+			if m.tutorial.Active && m.tutorial.Step == common.TutorialStepNavigate {
+				m.tutorial.Advance()
+			}
 
 		case key.Matches(msg, m.keys.Top):
 			m.goToTop()
@@ -228,6 +263,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Select):
 			m.toggleSelect()
+			// Advance tutorial if on select step and enough containers selected
+			if m.tutorial.Active && m.tutorial.Step == common.TutorialStepSelect {
+				availableCount := m.countAvailableContainers()
+				if m.tutorial.ShouldAdvanceFromSelect(len(m.selected), availableCount) {
+					m.tutorial.Advance()
+				}
+			}
 
 		case key.Matches(msg, m.keys.SelectAll):
 			m.selectAll()
@@ -237,6 +279,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Confirm):
 			if len(m.selected) > 0 {
+				// Advance tutorial to logview steps when confirming
+				if m.tutorial.Active && m.tutorial.Step == common.TutorialStepConfirm {
+					m.tutorial.Advance()
+				}
 				return m, m.confirmSelection()
 			}
 
@@ -399,6 +445,16 @@ func (m *Model) selectAll() {
 
 func (m *Model) clearSelection() {
 	m.selected = make(map[string]bool)
+}
+
+func (m *Model) countAvailableContainers() int {
+	count := 0
+	for _, item := range m.flatList {
+		if !item.isGroup && !item.isSeparator {
+			count++
+		}
+	}
+	return count
 }
 
 func (m *Model) goToTop() {
@@ -600,10 +656,19 @@ func (m Model) View() string {
 		height = 24
 	}
 
+	// Create tutorial hint bar (if tutorial is active)
+	var tutorialBar string
+	if m.tutorial.Active && m.tutorial.IsDiscoveryStep() {
+		tutorialBar = m.tutorial.View(width)
+	}
+
 	// Calculate how many lines we need for the bottom section
 	bottomSection := helpBar
+	if tutorialBar != "" {
+		bottomSection = tutorialBar + "\n" + helpBar
+	}
 	if toastLine != "" {
-		bottomSection = toastLine + "\n" + helpBar
+		bottomSection = toastLine + "\n" + bottomSection
 	}
 
 	// Use Place to position content at top, leaving room for bottom section
@@ -643,6 +708,11 @@ func (m Model) View() string {
 		)
 		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
 			base+"\n"+modalView)
+	}
+
+	// Overlay tutorial intro modal if at intro step
+	if m.tutorial.IsIntroStep() {
+		return m.tutorial.ViewIntroModal(width, height)
 	}
 
 	return content
@@ -704,5 +774,10 @@ func (m Model) renderInlineToast() string {
 		Width(width).
 		Align(lipgloss.Right).
 		Render(toastContent)
+}
+
+// GetTutorial returns the current tutorial state
+func (m Model) GetTutorial() common.Tutorial {
+	return m.tutorial
 }
 

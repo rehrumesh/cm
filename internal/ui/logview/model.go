@@ -107,11 +107,19 @@ type Model struct {
 
 	// Word wrap toggle
 	wordWrap bool
+
+	// Tutorial state
+	tutorial common.Tutorial
 }
 
 // New creates a new log view model
-func New(containers []docker.Container, dockerClient *docker.Client, width, height int) Model {
+func New(containers []docker.Container, dockerClient *docker.Client, width, height int, tutorial common.Tutorial) Model {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	// If tutorial is at pane nav step but there's only one pane, skip to maximize step
+	if tutorial.Active && tutorial.ShouldSkipPaneNav(len(containers)) {
+		tutorial.Advance()
+	}
 
 	m := Model{
 		panes:         make([]Pane, len(containers)),
@@ -132,6 +140,7 @@ func New(containers []docker.Container, dockerClient *docker.Client, width, heig
 		searchModal:   common.NewSearchModal(),
 		toast:         common.NewToast(),
 		selection:     NewSelection(),
+		tutorial:      tutorial,
 	}
 
 	// Calculate layout
@@ -363,6 +372,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Handle tutorial skip with 's' when tutorial is at the final step
+		if m.tutorial.Active && m.tutorial.Step == common.TutorialStepShell && msg.String() == "s" {
+			m.tutorial.Skip()
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(msg, m.keys.Back):
 			// If a pane is maximized, un-maximize it first
@@ -403,6 +418,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.maximizedPane = -1
 			}
 			m.recalculateLayout()
+			// Advance tutorial if on maximize step
+			if m.tutorial.Active && m.tutorial.Step == common.TutorialStepMaximize {
+				m.tutorial.Advance()
+			}
 
 		// Arrow keys: scroll when maximized, navigate when tiled
 		case key.Matches(msg, m.keys.Up):
@@ -433,6 +452,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			} else {
 				m.focusLeft()
+				// Advance tutorial if on pane nav step
+				if m.tutorial.Active && m.tutorial.Step == common.TutorialStepPaneNav {
+					m.tutorial.Advance()
+				}
 			}
 
 		case key.Matches(msg, m.keys.Right):
@@ -443,6 +466,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			} else {
 				m.focusRight()
+				// Advance tutorial if on pane nav step
+				if m.tutorial.Active && m.tutorial.Step == common.TutorialStepPaneNav {
+					m.tutorial.Advance()
+				}
 			}
 
 		// ctrl+u/d for scrolling focused pane (faster scroll)
@@ -591,6 +618,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			cmds = append(cmds, m.toast.Show("Debug Log", status, common.ToastSuccess))
 
 		case key.Matches(msg, m.keys.Exec):
+			// Complete tutorial if on shell step
+			if m.tutorial.Active && m.tutorial.Step == common.TutorialStepShell {
+				m.tutorial.Skip()
+			}
 			// Open shell in focused container
 			paneIdx := m.focusedPane
 			if m.maximizedPane != -1 {
@@ -1292,12 +1323,27 @@ func (m Model) View() (result string) {
 
 	var content string
 
+	// Create tutorial hint bar if active
+	var tutorialBar string
+	if m.tutorial.Active && m.tutorial.IsLogViewStep() {
+		tutorialBar = m.tutorial.View(m.width)
+	}
+
 	// Maximized view
 	if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+		// Calculate height: subtract help bar (1 line) and tutorial bar (1 line if active)
+		paneHeight := m.height - 1
+		if tutorialBar != "" {
+			paneHeight--
+		}
 		pane := m.panes[m.maximizedPane]
-		paneView := pane.View(m.width, m.height-1, true)
+		paneView := pane.View(m.width, paneHeight, true)
 		helpBar := m.renderHelpBar()
-		content = lipgloss.JoinVertical(lipgloss.Left, paneView, helpBar)
+		if tutorialBar != "" {
+			content = lipgloss.JoinVertical(lipgloss.Left, paneView, tutorialBar, helpBar)
+		} else {
+			content = lipgloss.JoinVertical(lipgloss.Left, paneView, helpBar)
+		}
 	} else {
 		// Tiled view
 		content = m.renderTiledView()
@@ -1463,8 +1509,14 @@ func (m Model) renderTiledView() string {
 		return "Invalid dimensions"
 	}
 
-	// Reserve 1 line for help bar
+	// Check if tutorial bar is active
+	hasTutorialBar := m.tutorial.Active && m.tutorial.IsLogViewStep()
+
+	// Reserve 1 line for help bar (+ 1 for tutorial bar if active)
 	availableHeight := m.height - 1
+	if hasTutorialBar {
+		availableHeight--
+	}
 	if availableHeight < 1 {
 		availableHeight = 1
 	}
@@ -1516,6 +1568,12 @@ func (m Model) renderTiledView() string {
 			}
 		}
 		rows = append(rows, lipgloss.JoinHorizontal(lipgloss.Top, cols...))
+	}
+
+	// Add tutorial bar if active
+	if hasTutorialBar {
+		tutorialBar := m.tutorial.View(m.width)
+		rows = append(rows, tutorialBar)
 	}
 
 	// Add help bar

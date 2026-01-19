@@ -2,6 +2,7 @@ package ui
 
 import (
 	"cm/internal/docker"
+	"cm/internal/ui/common"
 	"cm/internal/ui/discovery"
 	"cm/internal/ui/logview"
 
@@ -49,8 +50,8 @@ func NewApp(dockerClient *docker.Client, initialContainers []docker.Container) A
 // Note: AltScreen and Mouse are already enabled via tea.NewProgram options in main.go
 func (a App) Init() tea.Cmd {
 	if a.startWithLogView {
-		// Initialize log view directly
-		a.logview = logview.New(a.selectedConts, a.dockerClient, a.width, a.height)
+		// Initialize log view directly (no tutorial when starting directly in logview)
+		a.logview = logview.New(a.selectedConts, a.dockerClient, a.width, a.height, common.Tutorial{})
 		return a.logview.Init()
 	}
 	return a.discovery.Init()
@@ -64,15 +65,15 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.height = msg.Height
 		// Initialize log view with proper dimensions if starting with it
 		if a.startWithLogView && a.screen == ScreenLogView {
-			a.logview = logview.New(a.selectedConts, a.dockerClient, a.width, a.height)
+			a.logview = logview.New(a.selectedConts, a.dockerClient, a.width, a.height, common.Tutorial{})
 			a.startWithLogView = false
 			return a, a.logview.Init()
 		}
 
 	case discovery.ContainerSelectedMsg:
-		// Transition to log view
+		// Transition to log view, passing tutorial state from discovery
 		a.selectedConts = msg.Containers
-		a.logview = logview.New(msg.Containers, a.dockerClient, a.width, a.height)
+		a.logview = logview.New(msg.Containers, a.dockerClient, a.width, a.height, a.discovery.GetTutorial())
 		a.screen = ScreenLogView
 		return a, a.logview.Init()
 

@@ -199,9 +199,26 @@ func (n NotificationSettings) GetToastPosition() ToastPosition {
 	}
 }
 
+// TutorialSettings stores tutorial progress
+type TutorialSettings struct {
+	Completed bool `json:"completed"`
+}
+
 // Config represents the application configuration
 type Config struct {
 	Notifications *NotificationSettings `json:"notifications,omitempty"`
+	Tutorial      *TutorialSettings     `json:"tutorial,omitempty"`
+}
+
+// ShouldShowTutorial returns true if the tutorial should be shown
+func (c *Config) ShouldShowTutorial() bool {
+	return c.Tutorial == nil || !c.Tutorial.Completed
+}
+
+// MarkTutorialCompleted marks the tutorial as completed and saves to disk
+func (c *Config) MarkTutorialCompleted() error {
+	c.Tutorial = &TutorialSettings{Completed: true}
+	return c.Save()
 }
 
 // Projects represents saved compose projects (stored separately)
