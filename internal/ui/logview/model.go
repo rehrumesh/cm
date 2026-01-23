@@ -65,6 +65,15 @@ type streamInfo struct {
 	errChan <-chan error
 }
 
+// ResizeMode indicates what type of border is being dragged
+type ResizeMode int
+
+const (
+	ResizeNone ResizeMode = iota
+	ResizeColumn
+	ResizeRow
+)
+
 // Model represents the log view screen
 type Model struct {
 	panes         []Pane
@@ -86,6 +95,13 @@ type Model struct {
 	pendingResize bool
 	lastWidth     int
 	lastHeight    int
+
+	// For pane resize dragging
+	resizeMode      ResizeMode // current resize operation
+	resizeBorderIdx int        // which border is being dragged (column or row index)
+	resizeStartPos  int        // mouse position when drag started
+	resizeStartX    int        // for tracking continuous mouse position
+	resizeStartY    int
 
 	// Config modal
 	configModal common.ConfigModal
@@ -811,6 +827,30 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.recalculateLayout()
 				}
 			}
+
+		// Pane resize keys (only work in tiled mode)
+		case key.Matches(msg, m.keys.ResizeLeft):
+			if m.maximizedPane == -1 && len(m.panes) > 1 {
+				m.resizeFocusedPaneWidth(-ResizeStep)
+			}
+		case key.Matches(msg, m.keys.ResizeRight):
+			if m.maximizedPane == -1 && len(m.panes) > 1 {
+				m.resizeFocusedPaneWidth(ResizeStep)
+			}
+		case key.Matches(msg, m.keys.ResizeUp):
+			if m.maximizedPane == -1 && len(m.panes) > 1 {
+				m.resizeFocusedPaneHeight(-ResizeStep)
+			}
+		case key.Matches(msg, m.keys.ResizeDown):
+			if m.maximizedPane == -1 && len(m.panes) > 1 {
+				m.resizeFocusedPaneHeight(ResizeStep)
+			}
+		case key.Matches(msg, m.keys.ResizeReset):
+			if m.maximizedPane == -1 {
+				m.layout.ResetRatios()
+				m.recalculateLayout()
+				cmds = append(cmds, m.toast.Show("Layout", "Reset to equal", common.ToastSuccess))
+			}
 		}
 
 	case ContainerActionMsg:
@@ -977,30 +1017,20 @@ func (m *Model) getPanePosition(paneIdx int) (x, y int) {
 	// Reserve 1 line for help bar
 	availableHeight := m.height - 1
 
-	// Calculate position based on grid
-	baseWidth := m.width / m.layout.Cols
-	extraWidth := m.width % m.layout.Cols
-	baseHeight := availableHeight / m.layout.Rows
-	extraHeight := availableHeight % m.layout.Rows
+	// Get widths and heights from ratios
+	colWidths := m.layout.GetColumnWidths(m.width)
+	rowHeights := m.layout.GetRowHeights(availableHeight)
 
 	// Sum up widths of columns before this one
 	x = 0
 	for c := 0; c < col; c++ {
-		w := baseWidth
-		if c < extraWidth {
-			w++
-		}
-		x += w
+		x += colWidths[c]
 	}
 
 	// Sum up heights of rows before this one
 	y = 0
 	for r := 0; r < row; r++ {
-		h := baseHeight
-		if r < extraHeight {
-			h++
-		}
-		y += h
+		y += rowHeights[r]
 	}
 
 	return x, y
@@ -1016,42 +1046,30 @@ func (m *Model) getPaneAtPosition(x, y int) int {
 	// Reserve 1 line for help bar
 	availableHeight := m.height - 1
 
-	// Calculate base dimensions and remainders (same as renderTiledView)
-	baseWidth := m.width / m.layout.Cols
-	extraWidth := m.width % m.layout.Cols
+	// Get widths and heights from ratios
+	colWidths := m.layout.GetColumnWidths(m.width)
+	rowHeights := m.layout.GetRowHeights(availableHeight)
 
-	baseHeight := availableHeight / m.layout.Rows
-	extraHeight := availableHeight % m.layout.Rows
-
-	// Calculate cumulative positions to determine which cell the mouse is in
 	// Find the column
 	colX := 0
 	targetCol := -1
 	for col := 0; col < m.layout.Cols; col++ {
-		paneWidth := baseWidth
-		if col < extraWidth {
-			paneWidth++
-		}
-		if x >= colX && x < colX+paneWidth {
+		if x >= colX && x < colX+colWidths[col] {
 			targetCol = col
 			break
 		}
-		colX += paneWidth
+		colX += colWidths[col]
 	}
 
 	// Find the row
 	rowY := 0
 	targetRow := -1
 	for row := 0; row < m.layout.Rows; row++ {
-		paneHeight := baseHeight
-		if row < extraHeight {
-			paneHeight++
-		}
-		if y >= rowY && y < rowY+paneHeight {
+		if y >= rowY && y < rowY+rowHeights[row] {
 			targetRow = row
 			break
 		}
-		rowY += paneHeight
+		rowY += rowHeights[row]
 	}
 
 	// If we found a valid cell, return the pane index
@@ -1063,6 +1081,39 @@ func (m *Model) getPaneAtPosition(x, y int) int {
 	}
 
 	return -1
+}
+
+// borderProximity is how close the mouse needs to be to a border to trigger resize
+const borderProximity = 1
+
+// getBorderAtPosition checks if the mouse is near a resizable border
+// Returns the resize mode and border index, or ResizeNone if not on a border
+func (m *Model) getBorderAtPosition(x, y int) (ResizeMode, int) {
+	// Don't allow border resize when maximized
+	if m.maximizedPane >= 0 {
+		return ResizeNone, -1
+	}
+
+	// Reserve 1 line for help bar
+	availableHeight := m.height - 1
+
+	// Check column borders (vertical lines between columns)
+	colBorders := m.layout.GetColumnBorders(m.width)
+	for i, borderX := range colBorders {
+		if x >= borderX-borderProximity && x <= borderX+borderProximity {
+			return ResizeColumn, i
+		}
+	}
+
+	// Check row borders (horizontal lines between rows)
+	rowBorders := m.layout.GetRowBorders(availableHeight)
+	for i, borderY := range rowBorders {
+		if y >= borderY-borderProximity && y <= borderY+borderProximity {
+			return ResizeRow, i
+		}
+	}
+
+	return ResizeNone, -1
 }
 
 func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
@@ -1083,10 +1134,25 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			}
 			return nil
 		case tea.MouseButtonLeft:
+			// Check if clicking on a border for resize
+			mode, idx := m.getBorderAtPosition(msg.X, msg.Y)
+			if mode != ResizeNone {
+				m.resizeMode = mode
+				m.resizeBorderIdx = idx
+				m.resizeStartX = msg.X
+				m.resizeStartY = msg.Y
+				return nil
+			}
 			return m.handleMouseClick(msg)
 		}
 
 	case tea.MouseActionMotion:
+		// Handle border resize dragging
+		if m.resizeMode != ResizeNone {
+			m.handleResizeDrag(msg.X, msg.Y)
+			return nil
+		}
+
 		// Update selection if one is active
 		if m.selection.Active {
 			m.selection.Update(msg.X, msg.Y)
@@ -1099,6 +1165,13 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		}
 
 	case tea.MouseActionRelease:
+		// End resize mode if active
+		if m.resizeMode != ResizeNone {
+			m.resizeMode = ResizeNone
+			m.resizeBorderIdx = -1
+			return nil
+		}
+
 		// Finalize selection and copy to clipboard
 		if m.selection.Active && m.selection.HasSelection() {
 			paneIdx := m.selection.PaneIdx
@@ -1124,6 +1197,34 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 		m.selection.Clear()
 	}
 	return nil
+}
+
+// handleResizeDrag processes mouse drag during border resize
+func (m *Model) handleResizeDrag(x, y int) {
+	if m.resizeMode == ResizeColumn {
+		// Calculate delta as a ratio of total width
+		deltaPixels := x - m.resizeStartX
+		if deltaPixels == 0 {
+			return
+		}
+		delta := float64(deltaPixels) / float64(m.width)
+		if m.layout.ResizeColumn(m.resizeBorderIdx, delta) {
+			m.resizeStartX = x
+			m.recalculateLayout()
+		}
+	} else if m.resizeMode == ResizeRow {
+		// Calculate delta as a ratio of total height
+		availableHeight := m.height - 1
+		deltaPixels := y - m.resizeStartY
+		if deltaPixels == 0 {
+			return
+		}
+		delta := float64(deltaPixels) / float64(availableHeight)
+		if m.layout.ResizeRow(m.resizeBorderIdx, delta) {
+			m.resizeStartY = y
+			m.recalculateLayout()
+		}
+	}
 }
 
 func (m *Model) handleMouseClick(msg tea.MouseMsg) tea.Cmd {
@@ -1199,6 +1300,78 @@ func (m *Model) getPaneGridPosition(paneIdx int) (row, col int) {
 		}
 	}
 	return 0, 0
+}
+
+// resizeFocusedPaneWidth changes the width of the focused pane
+// delta > 0 grows the pane, delta < 0 shrinks it
+func (m *Model) resizeFocusedPaneWidth(delta float64) {
+	if m.layout.Cols <= 1 {
+		return
+	}
+	_, col := m.getPaneGridPosition(m.focusedPane)
+
+	// If we're growing (delta > 0), we take from the right neighbor if possible, else left
+	// If we're shrinking (delta < 0), we give to the right neighbor if possible, else left
+	if delta > 0 {
+		// Try to take from the right neighbor first
+		if col < m.layout.Cols-1 {
+			if m.layout.ResizeColumn(col, delta) {
+				m.recalculateLayout()
+			}
+		} else if col > 0 {
+			// Take from left neighbor (move left border left)
+			if m.layout.ResizeColumn(col-1, -delta) {
+				m.recalculateLayout()
+			}
+		}
+	} else {
+		// Shrinking - give to neighbor
+		if col < m.layout.Cols-1 {
+			if m.layout.ResizeColumn(col, delta) {
+				m.recalculateLayout()
+			}
+		} else if col > 0 {
+			if m.layout.ResizeColumn(col-1, -delta) {
+				m.recalculateLayout()
+			}
+		}
+	}
+}
+
+// resizeFocusedPaneHeight changes the height of the focused pane
+// delta > 0 grows the pane, delta < 0 shrinks it
+func (m *Model) resizeFocusedPaneHeight(delta float64) {
+	if m.layout.Rows <= 1 {
+		return
+	}
+	row, _ := m.getPaneGridPosition(m.focusedPane)
+
+	// If we're growing (delta > 0), we take from the bottom neighbor if possible, else top
+	// If we're shrinking (delta < 0), we give to the bottom neighbor if possible, else top
+	if delta > 0 {
+		// Try to take from the bottom neighbor first
+		if row < m.layout.Rows-1 {
+			if m.layout.ResizeRow(row, delta) {
+				m.recalculateLayout()
+			}
+		} else if row > 0 {
+			// Take from top neighbor (move top border up)
+			if m.layout.ResizeRow(row-1, -delta) {
+				m.recalculateLayout()
+			}
+		}
+	} else {
+		// Shrinking - give to neighbor
+		if row < m.layout.Rows-1 {
+			if m.layout.ResizeRow(row, delta) {
+				m.recalculateLayout()
+			}
+		} else if row > 0 {
+			if m.layout.ResizeRow(row-1, -delta) {
+				m.recalculateLayout()
+			}
+		}
+	}
 }
 
 func (m *Model) focusUp() {
@@ -1293,44 +1466,32 @@ func (m *Model) recalculateLayout() {
 		// Maximized mode - single pane uses full screen minus help bar
 		m.panes[m.maximizedPane].SetSize(m.width, availableHeight)
 	} else {
-		// Tiled mode - calculate layout and set pane sizes with proper remainder distribution
-		m.layout = CalculateLayout(len(m.panes))
+		// Tiled mode - calculate layout and set pane sizes using ratios
+		newLayout := CalculateLayout(len(m.panes))
 
 		// Safety check for layout
-		if m.layout.Cols <= 0 || m.layout.Rows <= 0 {
+		if newLayout.Cols <= 0 || newLayout.Rows <= 0 {
 			return
 		}
 
-		// Calculate base dimensions and remainders (same as renderTiledView)
-		baseWidth := m.width / m.layout.Cols
-		extraWidth := m.width % m.layout.Cols
-		baseHeight := availableHeight / m.layout.Rows
-		extraHeight := availableHeight % m.layout.Rows
+		// Preserve existing ratios if grid dimensions haven't changed
+		if m.layout.Cols == newLayout.Cols && m.layout.Rows == newLayout.Rows {
+			newLayout.ColumnRatios = m.layout.ColumnRatios
+			newLayout.RowRatios = m.layout.RowRatios
+		}
+		m.layout = newLayout
+		m.layout.EnsureRatios()
 
-		// Ensure minimum dimensions
-		if baseWidth < 4 {
-			baseWidth = 4
-		}
-		if baseHeight < 3 {
-			baseHeight = 3
-		}
+		// Get widths and heights from ratios
+		colWidths := m.layout.GetColumnWidths(m.width)
+		rowHeights := m.layout.GetRowHeights(availableHeight)
 
 		// Set each pane's size based on its grid position
 		for rowIdx := 0; rowIdx < m.layout.Rows; rowIdx++ {
-			paneHeight := baseHeight
-			if rowIdx < extraHeight {
-				paneHeight++
-			}
-
 			for colIdx := 0; colIdx < m.layout.Cols; colIdx++ {
-				paneWidth := baseWidth
-				if colIdx < extraWidth {
-					paneWidth++
-				}
-
 				paneIdx := m.layout.PaneMap[rowIdx][colIdx]
 				if paneIdx >= 0 && paneIdx < len(m.panes) {
-					m.panes[paneIdx].SetSize(paneWidth, paneHeight)
+					m.panes[paneIdx].SetSize(colWidths[colIdx], rowHeights[rowIdx])
 				}
 			}
 		}
@@ -1573,20 +1734,9 @@ func (m Model) renderTiledViewWithSearch(searchBar string) string {
 		availableHeight = 1
 	}
 
-	// Calculate base dimensions and remainders for even distribution
-	baseWidth := m.width / m.layout.Cols
-	extraWidth := m.width % m.layout.Cols
-
-	baseHeight := availableHeight / m.layout.Rows
-	extraHeight := availableHeight % m.layout.Rows
-
-	// Ensure minimum dimensions
-	if baseWidth < 4 {
-		baseWidth = 4
-	}
-	if baseHeight < 3 {
-		baseHeight = 3
-	}
+	// Get widths and heights from layout ratios
+	colWidths := m.layout.GetColumnWidths(m.width)
+	rowHeights := m.layout.GetRowHeights(availableHeight)
 
 	var rows []string
 
@@ -1596,31 +1746,19 @@ func (m Model) renderTiledViewWithSearch(searchBar string) string {
 	}
 
 	for rowIdx := 0; rowIdx < m.layout.Rows; rowIdx++ {
-		// Distribute extra height to first rows
-		paneHeight := baseHeight
-		if rowIdx < extraHeight {
-			paneHeight++
-		}
-
 		var cols []string
 		for colIdx := 0; colIdx < m.layout.Cols; colIdx++ {
-			// Distribute extra width to first columns
-			paneWidth := baseWidth
-			if colIdx < extraWidth {
-				paneWidth++
-			}
-
 			paneIdx := m.layout.PaneMap[rowIdx][colIdx]
 			if paneIdx >= 0 && paneIdx < len(m.panes) {
 				pane := m.panes[paneIdx]
 				focused := paneIdx == m.focusedPane
-				paneContent := pane.View(paneWidth, paneHeight, focused)
+				paneContent := pane.View(colWidths[colIdx], rowHeights[rowIdx], focused)
 				cols = append(cols, paneContent)
 			} else {
 				// Empty cell
 				cols = append(cols, lipgloss.NewStyle().
-					Width(paneWidth).
-					Height(paneHeight).
+					Width(colWidths[colIdx]).
+					Height(rowHeights[rowIdx]).
 					Render(""))
 			}
 		}
@@ -1667,7 +1805,7 @@ func (m Model) renderHelpBar() string {
 			desc("  ") + key("/") + desc(":search") +
 			desc("  ") + key("P") + desc(":pause") +
 			desc("  ") + key("←↑↓→") + desc(":nav") +
-			desc("  ") + key("y") + desc(":copy") +
+			desc("  ") + key("<>-+") + desc(":resize") +
 			desc("  ") + key("?") + desc(":help") +
 			desc("  ") + key("esc") + desc(":back") +
 			desc("  ") + key("q") + desc(":quit")

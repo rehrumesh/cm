@@ -67,6 +67,13 @@ type KeyMap struct {
 	Pane7 key.Binding
 	Pane8 key.Binding
 	Pane9 key.Binding
+
+	// Pane resize
+	ResizeLeft  key.Binding
+	ResizeRight key.Binding
+	ResizeUp    key.Binding
+	ResizeDown  key.Binding
+	ResizeReset key.Binding
 }
 
 // parseKeys splits a comma-separated key string into a slice
@@ -284,6 +291,28 @@ func DefaultKeyMap() KeyMap {
 		Pane9: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.Pane9)...),
 			key.WithHelp("9", "pane 9"),
+		),
+
+		// Pane resize
+		ResizeLeft: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ResizeLeft)...),
+			key.WithHelp("<", "shrink width"),
+		),
+		ResizeRight: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ResizeRight)...),
+			key.WithHelp(">", "grow width"),
+		),
+		ResizeUp: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ResizeUp)...),
+			key.WithHelp("-", "shrink height"),
+		),
+		ResizeDown: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ResizeDown)...),
+			key.WithHelp("+", "grow height"),
+		),
+		ResizeReset: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.ResizeReset)...),
+			key.WithHelp("=", "reset size"),
 		),
 	}
 }

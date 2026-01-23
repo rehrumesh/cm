@@ -78,6 +78,13 @@ type KeyBindings struct {
 	Pane7 string `json:"pane_7"`
 	Pane8 string `json:"pane_8"`
 	Pane9 string `json:"pane_9"`
+
+	// Pane resize
+	ResizeLeft   string `json:"resize_left"`
+	ResizeRight  string `json:"resize_right"`
+	ResizeUp     string `json:"resize_up"`
+	ResizeDown   string `json:"resize_down"`
+	ResizeReset  string `json:"resize_reset"`
 }
 
 // DefaultKeyBindings returns the default key bindings
@@ -140,6 +147,13 @@ func DefaultKeyBindings() KeyBindings {
 		Pane7: "7",
 		Pane8: "8",
 		Pane9: "9",
+
+		// Pane resize
+		ResizeLeft:  "<",
+		ResizeRight: ">",
+		ResizeUp:    "-",
+		ResizeDown:  "+",
+		ResizeReset: "=",
 	}
 }
 
@@ -345,6 +359,11 @@ func LoadKeyBindings() KeyBindings {
 	setDefault(&kb.Pane7, defaults.Pane7)
 	setDefault(&kb.Pane8, defaults.Pane8)
 	setDefault(&kb.Pane9, defaults.Pane9)
+	setDefault(&kb.ResizeLeft, defaults.ResizeLeft)
+	setDefault(&kb.ResizeRight, defaults.ResizeRight)
+	setDefault(&kb.ResizeUp, defaults.ResizeUp)
+	setDefault(&kb.ResizeDown, defaults.ResizeDown)
+	setDefault(&kb.ResizeReset, defaults.ResizeReset)
 
 	// Save back to file if any new keys were added
 	if modified {
