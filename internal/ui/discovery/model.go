@@ -42,6 +42,22 @@ type actionStartedMsg struct {
 	action string
 }
 
+// Build streaming messages
+type buildLogMsg struct {
+	log docker.OperationLog
+}
+
+type buildCompleteMsg struct {
+	success bool
+	err     error
+}
+
+type buildStreamStartedMsg struct {
+	stream   docker.StreamingResult
+	target   docker.Container
+	op       string
+}
+
 // Model represents the container discovery screen
 type Model struct {
 	groups             []docker.ContainerGroup
@@ -59,6 +75,9 @@ type Model struct {
 	savedProjectsModal common.SavedProjectsModal
 	toast              common.Toast
 	tutorial           common.Tutorial
+	buildPanel         common.BuildPanel
+	buildStream        *docker.StreamingResult
+	buildTarget        docker.Container
 }
 
 type listItem struct {
@@ -91,6 +110,7 @@ func New(dockerClient *docker.Client, initialSelection []docker.Container) Model
 		savedProjectsModal: common.NewSavedProjectsModal(),
 		toast:              common.NewToast(),
 		tutorial:           common.NewTutorial(),
+		buildPanel:         common.NewBuildPanel(),
 	}
 }
 
@@ -113,6 +133,72 @@ func (m Model) loadContainers() tea.Cmd {
 
 // Update handles messages
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
+	// Handle build panel messages first
+	if m.buildPanel.IsVisible() {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			if msg.String() == "esc" || msg.String() == "q" {
+				m.buildPanel.Close()
+				m.buildStream = nil
+				m.actionRunning = false
+				m.actionStatus = ""
+				return m, m.loadContainers()
+			}
+			// Pass other keys to build panel for scrolling
+			var cmd tea.Cmd
+			m.buildPanel, cmd = m.buildPanel.Update(msg)
+			return m, cmd
+		case tea.MouseMsg:
+			var cmd tea.Cmd
+			m.buildPanel, cmd = m.buildPanel.Update(msg)
+			return m, cmd
+		case buildLogMsg:
+			m.buildPanel.AddLog(msg.log)
+			// Continue listening for more stream output
+			return m, m.continueWaitForBuildStream()
+		case buildCompleteMsg:
+			cmd := m.buildPanel.Complete(msg.success, msg.err)
+			m.actionRunning = false
+			if msg.success {
+				m.actionStatus = fmt.Sprintf("%s completed", m.buildPanel.GetStatus())
+			} else {
+				m.actionStatus = fmt.Sprintf("%s failed", m.buildPanel.GetStatus())
+			}
+			return m, tea.Batch(cmd, m.loadContainers())
+		case common.BuildPanelCloseMsg:
+			m.buildPanel.Close()
+			m.buildStream = nil
+			m.actionStatus = ""
+			return m, m.loadContainers()
+		case tea.WindowSizeMsg:
+			m.width = msg.Width
+			m.height = msg.Height
+			// Build panel takes 40% of width
+			panelWidth := msg.Width * 40 / 100
+			if panelWidth < 40 {
+				panelWidth = 40
+			}
+			m.buildPanel.SetSize(panelWidth, msg.Height-2)
+			return m, nil
+		}
+		return m, nil
+	}
+
+	// Handle build stream started
+	if streamMsg, ok := msg.(buildStreamStartedMsg); ok {
+		m.buildStream = &streamMsg.stream
+		m.buildTarget = streamMsg.target
+		m.buildPanel.Start(streamMsg.op, streamMsg.target.ComposeService)
+		// Set initial panel size
+		panelWidth := m.width * 40 / 100
+		if panelWidth < 40 {
+			panelWidth = 40
+		}
+		m.buildPanel.SetSize(panelWidth, m.height-2)
+		// Start listening for stream output
+		return m, m.waitForBuildStream(streamMsg.stream)
+	}
+
 	// Handle saved projects modal messages first
 	if m.savedProjectsModal.IsVisible() {
 		var cmd tea.Cmd
@@ -302,7 +388,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, m.doAction("restart", m.getActionTargets(), m.dockerClient.ComposeDownUp)
 
 		case key.Matches(msg, m.keys.ComposeBuild):
-			return m, m.doAction("build", m.getActionTargets(), m.dockerClient.ComposeBuildUp)
+			return m, m.doStreamingBuild("build", m.getActionTargets())
 
 		case key.Matches(msg, m.keys.Config):
 			return m, m.configModal.Open()
@@ -419,6 +505,67 @@ func (m Model) doAction(name string, targets []docker.Container, action composeA
 			}
 		},
 	)
+}
+
+// doStreamingBuild starts a streaming build operation with log output
+func (m Model) doStreamingBuild(op string, targets []docker.Container) tea.Cmd {
+	if len(targets) == 0 {
+		return nil
+	}
+
+	// For now, only support single target for streaming build panel
+	// Multiple targets fall back to non-streaming bulk action
+	if len(targets) > 1 {
+		return m.doAction(op, targets, m.dockerClient.ComposeBuildUp)
+	}
+
+	target := targets[0]
+	if target.ComposeProject == "" || target.ComposeService == "" {
+		return m.toast.Show("Cannot build", "Not a compose service", common.ToastError)
+	}
+
+	m.actionRunning = true
+	m.actionStatus = fmt.Sprintf("Building %s...", target.ComposeService)
+
+	return func() tea.Msg {
+		stream := m.dockerClient.ComposeBuildUpStream(context.Background(), target)
+		return buildStreamStartedMsg{
+			stream: stream,
+			target: target,
+			op:     op,
+		}
+	}
+}
+
+// waitForBuildStream waits for output from the build stream
+func (m Model) waitForBuildStream(stream docker.StreamingResult) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case log, ok := <-stream.LogChan:
+			if !ok {
+				// Log channel closed, check for completion
+				select {
+				case err := <-stream.ErrChan:
+					return buildCompleteMsg{success: err == nil, err: err}
+				case <-stream.DoneChan:
+					return buildCompleteMsg{success: true, err: nil}
+				}
+			}
+			return buildLogMsg{log: log}
+		case err := <-stream.ErrChan:
+			return buildCompleteMsg{success: err == nil, err: err}
+		case <-stream.DoneChan:
+			return buildCompleteMsg{success: true, err: nil}
+		}
+	}
+}
+
+// continueWaitForBuildStream continues waiting for build stream output
+func (m Model) continueWaitForBuildStream() tea.Cmd {
+	if m.buildStream == nil {
+		return nil
+	}
+	return m.waitForBuildStream(*m.buildStream)
 }
 
 func (m *Model) toggleSelect() {
@@ -637,6 +784,11 @@ func (m Model) View() string {
 	// Build main content area (everything except help bar)
 	mainContent := b.String()
 
+	// If build panel is visible, render split layout
+	if m.buildPanel.IsVisible() {
+		return m.renderWithBuildPanel(mainContent)
+	}
+
 	// Create help bar
 	helpBar := m.renderHelpBar()
 
@@ -801,5 +953,53 @@ func (m Model) renderInlineToast() string {
 // GetTutorial returns the current tutorial state
 func (m Model) GetTutorial() common.Tutorial {
 	return m.tutorial
+}
+
+// renderWithBuildPanel renders the discovery view with the build panel on the right
+func (m Model) renderWithBuildPanel(mainContent string) string {
+	width := m.width
+	height := m.height
+	if width <= 0 {
+		width = 80
+	}
+	if height <= 0 {
+		height = 24
+	}
+
+	// Calculate widths: 60% for list, 40% for build panel
+	listWidth := width * 60 / 100
+	panelWidth := width - listWidth
+	if panelWidth < 40 {
+		panelWidth = 40
+		listWidth = width - panelWidth
+	}
+
+	// Help bar at the bottom
+	helpBar := m.renderHelpBar()
+	helpBarHeight := 1
+
+	// Available height for content
+	contentHeight := height - helpBarHeight
+	if contentHeight < 10 {
+		contentHeight = 10
+	}
+
+	// Render list in left column (with padding/scroll if needed)
+	listContent := lipgloss.NewStyle().
+		Width(listWidth).
+		Height(contentHeight).
+		MaxWidth(listWidth).
+		MaxHeight(contentHeight).
+		Render(mainContent)
+
+	// Render build panel in right column
+	m.buildPanel.SetSize(panelWidth, contentHeight)
+	panelContent := m.buildPanel.View()
+
+	// Join horizontally
+	contentArea := lipgloss.JoinHorizontal(lipgloss.Top, listContent, panelContent)
+
+	// Join with help bar
+	return lipgloss.JoinVertical(lipgloss.Left, contentArea, helpBar)
 }
 

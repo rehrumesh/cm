@@ -628,3 +628,366 @@ func (c *Client) ComposeBuildUp(ctx context.Context, cont Container) error {
 	}
 	return upCmd.Run()
 }
+
+// OperationLog represents a log line from a compose operation
+type OperationLog struct {
+	Timestamp time.Time
+	Stream    string // "stdout", "stderr", "system"
+	Content   string
+}
+
+// StreamingResult holds channels for operation output
+type StreamingResult struct {
+	LogChan  <-chan OperationLog
+	ErrChan  <-chan error
+	DoneChan <-chan struct{}
+}
+
+// getComposeBaseArgs returns the base args for compose commands
+func getComposeBaseArgs(cont Container) (baseArgs []string, workingDir string) {
+	projects := getCachedProjects()
+	var configFile string
+	if proj, ok := projects.SavedProjects[cont.ComposeProject]; ok {
+		configFile = proj.ConfigFile
+		workingDir = proj.WorkingDir
+	}
+
+	if configFile != "" {
+		for _, f := range strings.Split(configFile, ",") {
+			f = strings.TrimSpace(f)
+			if f != "" {
+				baseArgs = append(baseArgs, "-f", f)
+			}
+		}
+	}
+	baseArgs = append(baseArgs, "-p", cont.ComposeProject)
+	return baseArgs, workingDir
+}
+
+// runStreamingCommand executes a command and streams output to channels
+func runStreamingCommand(ctx context.Context, cmd *exec.Cmd) StreamingResult {
+	logChan := make(chan OperationLog, 100)
+	errChan := make(chan error, 1)
+	doneChan := make(chan struct{})
+
+	go func() {
+		defer close(logChan)
+		defer close(errChan)
+		defer close(doneChan)
+
+		// Get stdout and stderr pipes
+		stdout, err := cmd.StdoutPipe()
+		if err != nil {
+			errChan <- fmt.Errorf("failed to get stdout pipe: %w", err)
+			return
+		}
+		stderr, err := cmd.StderrPipe()
+		if err != nil {
+			errChan <- fmt.Errorf("failed to get stderr pipe: %w", err)
+			return
+		}
+
+		// Start the command
+		if err := cmd.Start(); err != nil {
+			errChan <- fmt.Errorf("failed to start command: %w", err)
+			return
+		}
+
+		// Read stdout and stderr concurrently
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		// Read stdout
+		go func() {
+			defer wg.Done()
+			scanner := newLineScanner(stdout)
+			for scanner.Scan() {
+				select {
+				case <-ctx.Done():
+					return
+				case logChan <- OperationLog{
+					Timestamp: time.Now(),
+					Stream:    "stdout",
+					Content:   scanner.Text(),
+				}:
+				}
+			}
+		}()
+
+		// Read stderr
+		go func() {
+			defer wg.Done()
+			scanner := newLineScanner(stderr)
+			for scanner.Scan() {
+				select {
+				case <-ctx.Done():
+					return
+				case logChan <- OperationLog{
+					Timestamp: time.Now(),
+					Stream:    "stderr",
+					Content:   scanner.Text(),
+				}:
+				}
+			}
+		}()
+
+		// Wait for readers to finish
+		wg.Wait()
+
+		// Wait for command to complete
+		if err := cmd.Wait(); err != nil {
+			errChan <- err
+		}
+	}()
+
+	return StreamingResult{
+		LogChan:  logChan,
+		ErrChan:  errChan,
+		DoneChan: doneChan,
+	}
+}
+
+// newLineScanner creates a scanner that handles long lines
+func newLineScanner(r interface{ Read([]byte) (int, error) }) *lineScanner {
+	return &lineScanner{reader: r, buf: make([]byte, 0, 4096)}
+}
+
+type lineScanner struct {
+	reader interface{ Read([]byte) (int, error) }
+	buf    []byte
+	line   string
+	err    error
+}
+
+func (s *lineScanner) Scan() bool {
+	for {
+		// Check if we have a complete line in the buffer
+		if idx := strings.Index(string(s.buf), "\n"); idx >= 0 {
+			s.line = string(s.buf[:idx])
+			s.buf = s.buf[idx+1:]
+			return true
+		}
+
+		// Read more data
+		tmp := make([]byte, 4096)
+		n, err := s.reader.Read(tmp)
+		if n > 0 {
+			s.buf = append(s.buf, tmp[:n]...)
+		}
+		if err != nil {
+			// If we have remaining data, return it as the last line
+			if len(s.buf) > 0 {
+				s.line = string(s.buf)
+				s.buf = s.buf[:0]
+				return true
+			}
+			s.err = err
+			return false
+		}
+	}
+}
+
+func (s *lineScanner) Text() string {
+	return s.line
+}
+
+// ComposeBuildStream runs docker compose build --no-cache with streaming output
+func (c *Client) ComposeBuildStream(ctx context.Context, cont Container) StreamingResult {
+	if cont.ComposeProject == "" || cont.ComposeService == "" {
+		errChan := make(chan error, 1)
+		logChan := make(chan OperationLog)
+		doneChan := make(chan struct{})
+		errChan <- fmt.Errorf("container is not part of a compose project")
+		close(errChan)
+		close(logChan)
+		close(doneChan)
+		return StreamingResult{LogChan: logChan, ErrChan: errChan, DoneChan: doneChan}
+	}
+
+	baseArgs, workingDir := getComposeBaseArgs(cont)
+	buildArgs := append(baseArgs, "build", "--no-cache", "--progress=plain", cont.ComposeService)
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, buildArgs...)...)
+	if workingDir != "" {
+		cmd.Dir = workingDir
+	}
+
+	return runStreamingCommand(ctx, cmd)
+}
+
+// ComposeUpStream runs docker compose up -d with streaming output
+func (c *Client) ComposeUpStream(ctx context.Context, cont Container) StreamingResult {
+	if cont.ComposeProject == "" || cont.ComposeService == "" {
+		errChan := make(chan error, 1)
+		logChan := make(chan OperationLog)
+		doneChan := make(chan struct{})
+		errChan <- fmt.Errorf("container is not part of a compose project")
+		close(errChan)
+		close(logChan)
+		close(doneChan)
+		return StreamingResult{LogChan: logChan, ErrChan: errChan, DoneChan: doneChan}
+	}
+
+	baseArgs, workingDir := getComposeBaseArgs(cont)
+	upArgs := append(baseArgs, "up", "-d", cont.ComposeService)
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, upArgs...)...)
+	if workingDir != "" {
+		cmd.Dir = workingDir
+	}
+
+	return runStreamingCommand(ctx, cmd)
+}
+
+// ComposeDownStream runs docker compose down with streaming output
+func (c *Client) ComposeDownStream(ctx context.Context, cont Container) StreamingResult {
+	if cont.ComposeProject == "" || cont.ComposeService == "" {
+		errChan := make(chan error, 1)
+		logChan := make(chan OperationLog)
+		doneChan := make(chan struct{})
+		errChan <- fmt.Errorf("container is not part of a compose project")
+		close(errChan)
+		close(logChan)
+		close(doneChan)
+		return StreamingResult{LogChan: logChan, ErrChan: errChan, DoneChan: doneChan}
+	}
+
+	baseArgs, workingDir := getComposeBaseArgs(cont)
+	downArgs := append(baseArgs, "down", cont.ComposeService)
+	cmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, downArgs...)...)
+	if workingDir != "" {
+		cmd.Dir = workingDir
+	}
+
+	return runStreamingCommand(ctx, cmd)
+}
+
+// ComposeBuildUpStream runs docker compose build --no-cache then up -d with streaming output
+func (c *Client) ComposeBuildUpStream(ctx context.Context, cont Container) StreamingResult {
+	if cont.ComposeProject == "" || cont.ComposeService == "" {
+		errChan := make(chan error, 1)
+		logChan := make(chan OperationLog)
+		doneChan := make(chan struct{})
+		errChan <- fmt.Errorf("container is not part of a compose project")
+		close(errChan)
+		close(logChan)
+		close(doneChan)
+		return StreamingResult{LogChan: logChan, ErrChan: errChan, DoneChan: doneChan}
+	}
+
+	logChan := make(chan OperationLog, 100)
+	errChan := make(chan error, 1)
+	doneChan := make(chan struct{})
+
+	go func() {
+		defer close(logChan)
+		defer close(errChan)
+		defer close(doneChan)
+
+		baseArgs, workingDir := getComposeBaseArgs(cont)
+
+		// Phase 1: Build
+		logChan <- OperationLog{
+			Timestamp: time.Now(),
+			Stream:    "system",
+			Content:   "--- Starting build (no-cache) ---",
+		}
+
+		buildArgs := append(baseArgs, "build", "--no-cache", "--progress=plain", cont.ComposeService)
+		buildCmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, buildArgs...)...)
+		if workingDir != "" {
+			buildCmd.Dir = workingDir
+		}
+
+		buildResult := runStreamingCommand(ctx, buildCmd)
+
+		// Forward build logs
+		var buildErr error
+	buildLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case log, ok := <-buildResult.LogChan:
+				if !ok {
+					break buildLoop
+				}
+				logChan <- log
+			case err := <-buildResult.ErrChan:
+				if err != nil {
+					buildErr = err
+				}
+			}
+		}
+
+		// Wait for build done
+		<-buildResult.DoneChan
+
+		if buildErr != nil {
+			logChan <- OperationLog{
+				Timestamp: time.Now(),
+				Stream:    "stderr",
+				Content:   fmt.Sprintf("--- Build failed: %v ---", buildErr),
+			}
+			errChan <- buildErr
+			return
+		}
+
+		logChan <- OperationLog{
+			Timestamp: time.Now(),
+			Stream:    "system",
+			Content:   "--- Build complete, starting container ---",
+		}
+
+		// Phase 2: Up
+		upArgs := append(baseArgs, "up", "-d", cont.ComposeService)
+		upCmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, upArgs...)...)
+		if workingDir != "" {
+			upCmd.Dir = workingDir
+		}
+
+		upResult := runStreamingCommand(ctx, upCmd)
+
+		// Forward up logs
+		var upErr error
+	upLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case log, ok := <-upResult.LogChan:
+				if !ok {
+					break upLoop
+				}
+				logChan <- log
+			case err := <-upResult.ErrChan:
+				if err != nil {
+					upErr = err
+				}
+			}
+		}
+
+		// Wait for up done
+		<-upResult.DoneChan
+
+		if upErr != nil {
+			logChan <- OperationLog{
+				Timestamp: time.Now(),
+				Stream:    "stderr",
+				Content:   fmt.Sprintf("--- Up failed: %v ---", upErr),
+			}
+			errChan <- upErr
+			return
+		}
+
+		logChan <- OperationLog{
+			Timestamp: time.Now(),
+			Stream:    "system",
+			Content:   "--- Container started successfully ---",
+		}
+	}()
+
+	return StreamingResult{
+		LogChan:  logChan,
+		ErrChan:  errChan,
+		DoneChan: doneChan,
+	}
+}

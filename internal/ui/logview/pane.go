@@ -129,6 +129,12 @@ type Pane struct {
 	searchQuery   string
 	matchIndices  []int // line indices that match
 	currentMatch  int   // index into matchIndices
+
+	// Build mode state
+	buildMode      bool
+	buildLogs      []docker.OperationLog
+	buildOperation string // "build", "up", "down"
+	buildStatus    string // "running", "success", "error"
 }
 
 // NewPane creates a new log pane for a container
@@ -910,6 +916,102 @@ func (p *Pane) GetPlainTextLogs() string {
 	return b.String()
 }
 
+// SetBuildMode enters build mode for a specific operation
+func (p *Pane) SetBuildMode(operation string) {
+	p.buildMode = true
+	p.buildOperation = operation
+	p.buildStatus = "running"
+	p.buildLogs = nil
+	p.Viewport.SetContent(p.renderBuildLogs())
+	p.Viewport.GotoTop()
+}
+
+// AddBuildLog adds a log line while in build mode
+func (p *Pane) AddBuildLog(log docker.OperationLog) {
+	if !p.buildMode {
+		return
+	}
+	p.buildLogs = append(p.buildLogs, log)
+	// Trim if too many lines
+	if len(p.buildLogs) > maxLogLines {
+		p.buildLogs = p.buildLogs[len(p.buildLogs)-maxLogLines:]
+	}
+	p.Viewport.SetContent(p.renderBuildLogs())
+	p.Viewport.GotoBottom()
+}
+
+// EndBuildMode marks build as complete with success/error status
+func (p *Pane) EndBuildMode(success bool) {
+	if success {
+		p.buildStatus = "success"
+	} else {
+		p.buildStatus = "error"
+	}
+	p.Viewport.SetContent(p.renderBuildLogs())
+}
+
+// ClearBuildMode exits build mode and returns to normal log view
+func (p *Pane) ClearBuildMode() {
+	p.buildMode = false
+	p.buildOperation = ""
+	p.buildStatus = ""
+	p.buildLogs = nil
+	p.Viewport.SetContent(p.renderLogs())
+	p.Viewport.GotoBottom()
+}
+
+// IsBuildMode returns whether the pane is in build mode
+func (p *Pane) IsBuildMode() bool {
+	return p.buildMode
+}
+
+// GetBuildStatus returns the current build status
+func (p *Pane) GetBuildStatus() string {
+	return p.buildStatus
+}
+
+// renderBuildLogs renders build log content
+func (p *Pane) renderBuildLogs() string {
+	if len(p.buildLogs) == 0 {
+		return common.SubtitleStyle.Render("Waiting for output...")
+	}
+
+	const timestampWidth = 9
+	contentWidth := p.Viewport.Width - timestampWidth - 1
+	if contentWidth < 10 {
+		contentWidth = 10
+	}
+
+	var b strings.Builder
+	for _, log := range p.buildLogs {
+		ts := common.TimestampStyle.Render(log.Timestamp.Format("15:04:05"))
+		var content string
+		switch log.Stream {
+		case "stderr":
+			content = common.StderrStyle.Render(log.Content)
+		case "system":
+			content = common.SubtitleStyle.Render(log.Content)
+		default:
+			content = log.Content
+		}
+
+		if p.wordWrap {
+			wrapped := wrap.String(stripANSI(log.Content), contentWidth)
+			wrappedLines := strings.Split(wrapped, "\n")
+			for i, wline := range wrappedLines {
+				if i == 0 {
+					b.WriteString(fmt.Sprintf("%s %s%s\n", ts, wline, ansiReset))
+				} else {
+					b.WriteString(fmt.Sprintf("%s %s%s\n", strings.Repeat(" ", 8), wline, ansiReset))
+				}
+			}
+		} else {
+			b.WriteString(fmt.Sprintf("%s %s%s\n", ts, content, ansiReset))
+		}
+	}
+	return b.String()
+}
+
 // GetTextInRange returns log lines in a given line range (0-indexed, relative to viewport)
 func (p *Pane) GetTextInRange(startLine, endLine int) string {
 	if len(p.LogLines) == 0 {
@@ -1070,21 +1172,46 @@ func (p *Pane) View(width, height int, focused bool) (result string) {
 		height = 3
 	}
 
-	// Title bar
-	title := p.Container.DisplayName()
-	if !p.Connected {
-		title += " (disconnected)"
-	}
-	if p.Paused {
-		title += " [PAUSED]"
-	}
-
-	// Status indicator based on container state
+	// Title bar - different in build mode
+	var title string
 	var status string
-	if p.Container.State == "running" {
-		status = common.RunningStyle.Render("●")
+
+	if p.buildMode {
+		// Build mode title
+		opName := p.buildOperation
+		if opName == "" {
+			opName = "Build"
+		}
+		opName = strings.ToUpper(opName[:1]) + opName[1:]
+		title = fmt.Sprintf("%s %s", opName, p.Container.DisplayName())
+
+		// Status indicator based on build status
+		switch p.buildStatus {
+		case "running":
+			status = lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Render("...")
+		case "success":
+			status = common.RunningStyle.Render(" OK")
+		case "error":
+			status = common.StoppedStyle.Render(" ERR")
+		default:
+			status = ""
+		}
 	} else {
-		status = common.StoppedStyle.Render("○")
+		// Normal mode title
+		title = p.Container.DisplayName()
+		if !p.Connected {
+			title += " (disconnected)"
+		}
+		if p.Paused {
+			title += " [PAUSED]"
+		}
+
+		// Status indicator based on container state
+		if p.Container.State == "running" {
+			status = common.RunningStyle.Render("●")
+		} else {
+			status = common.StoppedStyle.Render("○")
+		}
 	}
 
 	// Inner content width (excluding borders)

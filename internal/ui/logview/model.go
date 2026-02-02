@@ -59,6 +59,29 @@ type StreamClosedMsg struct {
 	ContainerID string
 }
 
+// Build streaming messages
+type BuildLogMsg struct {
+	ContainerID string
+	Log         docker.OperationLog
+}
+
+type BuildCompleteMsg struct {
+	ContainerID string
+	Operation   string
+	Success     bool
+	Error       error
+}
+
+type BuildStreamStartedMsg struct {
+	ContainerID string
+	Stream      docker.StreamingResult
+	Operation   string
+}
+
+type returnToLogsMsg struct {
+	ContainerID string
+}
+
 // streamInfo holds the channels for a container's log stream
 type streamInfo struct {
 	logChan <-chan docker.LogLine
@@ -127,6 +150,9 @@ type Model struct {
 
 	// Tutorial state
 	tutorial common.Tutorial
+
+	// Build streams for panes in build mode
+	buildStreams map[string]*docker.StreamingResult // containerID -> stream
 }
 
 // New creates a new log view model
@@ -158,6 +184,7 @@ func New(containers []docker.Container, dockerClient *docker.Client, width, heig
 		toast:         common.NewToast(),
 		selection:     NewSelection(),
 		tutorial:      tutorial,
+		buildStreams:  make(map[string]*docker.StreamingResult),
 	}
 
 	// Calculate layout
@@ -641,13 +668,37 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.ComposeBuild):
 			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
 				pane := &m.panes[m.focusedPane]
-				pane.AddLogLine(docker.LogLine{
-					ContainerID: pane.ID,
-					Timestamp:   time.Now(),
-					Stream:      "system",
-					Content:     "--- Building (no-cache) and starting... ---",
-				})
-				cmds = append(cmds, m.composeBuildUp(pane.Container))
+				if pane.Container.ComposeProject == "" || pane.Container.ComposeService == "" {
+					cmds = append(cmds, m.toast.Show("Cannot build", "Not a compose service", common.ToastError))
+				} else {
+					// Start streaming build
+					pane.SetBuildMode("build")
+					cmds = append(cmds, m.startBuildStream(pane.Container, "build"))
+				}
+			}
+
+		case key.Matches(msg, m.keys.ComposeUp):
+			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
+				pane := &m.panes[m.focusedPane]
+				if pane.Container.ComposeProject == "" || pane.Container.ComposeService == "" {
+					cmds = append(cmds, m.toast.Show("Cannot start", "Not a compose service", common.ToastError))
+				} else {
+					// Start streaming up
+					pane.SetBuildMode("up")
+					cmds = append(cmds, m.startBuildStream(pane.Container, "up"))
+				}
+			}
+
+		case key.Matches(msg, m.keys.ComposeDown):
+			if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
+				pane := &m.panes[m.focusedPane]
+				if pane.Container.ComposeProject == "" || pane.Container.ComposeService == "" {
+					cmds = append(cmds, m.toast.Show("Cannot stop", "Not a compose service", common.ToastError))
+				} else {
+					// Start streaming down
+					pane.SetBuildMode("down")
+					cmds = append(cmds, m.startBuildStream(pane.Container, "down"))
+				}
 			}
 
 		case key.Matches(msg, m.keys.Config):
@@ -959,6 +1010,62 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				} else {
 					cmds = append(cmds, m.toast.Show("Shell exited", m.panes[i].Container.DisplayName(), common.ToastSuccess))
 				}
+				break
+			}
+		}
+
+	case BuildStreamStartedMsg:
+		// Store the stream and start listening
+		m.buildStreams[msg.ContainerID] = &msg.Stream
+		cmds = append(cmds, m.waitForBuildStream(msg.ContainerID, msg.Stream))
+
+	case BuildLogMsg:
+		// Add log to the pane in build mode
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID && m.panes[i].IsBuildMode() {
+				m.panes[i].AddBuildLog(msg.Log)
+				// Continue listening for more logs
+				if stream, ok := m.buildStreams[msg.ContainerID]; ok && stream != nil {
+					cmds = append(cmds, m.waitForBuildStream(msg.ContainerID, *stream))
+				}
+				break
+			}
+		}
+
+	case BuildCompleteMsg:
+		// Mark build as complete and schedule auto-return to logs
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID && m.panes[i].IsBuildMode() {
+				m.panes[i].EndBuildMode(msg.Success)
+				delete(m.buildStreams, msg.ContainerID)
+
+				// Show toast
+				serviceName := m.panes[i].Container.DisplayName()
+				if msg.Success {
+					cmds = append(cmds, m.toast.Show(msg.Operation+" Complete", serviceName, common.ToastSuccess))
+				} else {
+					errMsg := "failed"
+					if msg.Error != nil {
+						errMsg = msg.Error.Error()
+					}
+					cmds = append(cmds, m.toast.Show(msg.Operation+" Failed", errMsg, common.ToastError))
+				}
+
+				// Auto-return to logs after 2 seconds if successful
+				if msg.Success {
+					cmds = append(cmds, m.scheduleReturnToLogs(msg.ContainerID))
+					// Also restart the log stream
+					cmds = append(cmds, m.restartLogStream(m.panes[i].Container))
+				}
+				break
+			}
+		}
+
+	case returnToLogsMsg:
+		// Return pane to normal log view
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID && m.panes[i].IsBuildMode() {
+				m.panes[i].ClearBuildMode()
 				break
 			}
 		}
@@ -1785,7 +1892,8 @@ func (m Model) renderHelpBar() string {
 	var help string
 	if m.maximizedPane != -1 {
 		// Maximized pane view
-		help = " " + key("r") + desc(":restart") +
+		help = " " + key("b") + desc(":build") +
+			desc("  ") + key("r") + desc(":restart") +
 			desc("  ") + key("R") + desc(":down/up") +
 			desc("  ") + key("e") + desc(":shell") +
 			desc("  ") + key("i") + desc(":inspect") +
@@ -1798,7 +1906,8 @@ func (m Model) renderHelpBar() string {
 			desc("  ") + key("q") + desc(":quit")
 	} else {
 		// Tiled panes view
-		help = " " + key("r") + desc(":restart") +
+		help = " " + key("b") + desc(":build") +
+			desc("  ") + key("r") + desc(":restart") +
 			desc("  ") + key("R") + desc(":down/up") +
 			desc("  ") + key("e") + desc(":shell") +
 			desc("  ") + key("i") + desc(":inspect") +
@@ -2168,5 +2277,77 @@ fi
 	c := exec.Command("sh", "-c", script)
 	return tea.ExecProcess(c, func(err error) tea.Msg {
 		return shellExitMsg{ContainerID: container.ID, Err: err}
+	})
+}
+
+// startBuildStream starts a streaming build/up/down operation
+func (m Model) startBuildStream(cont docker.Container, op string) tea.Cmd {
+	return func() tea.Msg {
+		var stream docker.StreamingResult
+		switch op {
+		case "build":
+			stream = m.dockerClient.ComposeBuildUpStream(m.ctx, cont)
+		case "up":
+			stream = m.dockerClient.ComposeUpStream(m.ctx, cont)
+		case "down":
+			stream = m.dockerClient.ComposeDownStream(m.ctx, cont)
+		default:
+			stream = m.dockerClient.ComposeBuildUpStream(m.ctx, cont)
+		}
+		return BuildStreamStartedMsg{
+			ContainerID: cont.ID,
+			Stream:      stream,
+			Operation:   op,
+		}
+	}
+}
+
+// waitForBuildStream waits for output from a build stream
+func (m Model) waitForBuildStream(containerID string, stream docker.StreamingResult) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case log, ok := <-stream.LogChan:
+			if !ok {
+				// Log channel closed, check for completion
+				select {
+				case err := <-stream.ErrChan:
+					return BuildCompleteMsg{
+						ContainerID: containerID,
+						Operation:   "Build",
+						Success:     err == nil,
+						Error:       err,
+					}
+				case <-stream.DoneChan:
+					return BuildCompleteMsg{
+						ContainerID: containerID,
+						Operation:   "Build",
+						Success:     true,
+						Error:       nil,
+					}
+				}
+			}
+			return BuildLogMsg{ContainerID: containerID, Log: log}
+		case err := <-stream.ErrChan:
+			return BuildCompleteMsg{
+				ContainerID: containerID,
+				Operation:   "Build",
+				Success:     err == nil,
+				Error:       err,
+			}
+		case <-stream.DoneChan:
+			return BuildCompleteMsg{
+				ContainerID: containerID,
+				Operation:   "Build",
+				Success:     true,
+				Error:       nil,
+			}
+		}
+	}
+}
+
+// scheduleReturnToLogs schedules a return to log view after build completion
+func (m Model) scheduleReturnToLogs(containerID string) tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return returnToLogsMsg{ContainerID: containerID}
 	})
 }
