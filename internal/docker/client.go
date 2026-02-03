@@ -860,6 +860,174 @@ func (c *Client) ComposeDownStream(ctx context.Context, cont Container) Streamin
 	return runStreamingCommand(ctx, cmd)
 }
 
+// ComposeBuildUpStreamMulti runs docker compose build --no-cache then up -d for multiple services with streaming output
+func (c *Client) ComposeBuildUpStreamMulti(ctx context.Context, containers []Container) StreamingResult {
+	if len(containers) == 0 {
+		errChan := make(chan error, 1)
+		logChan := make(chan OperationLog)
+		doneChan := make(chan struct{})
+		errChan <- fmt.Errorf("no containers provided")
+		close(errChan)
+		close(logChan)
+		close(doneChan)
+		return StreamingResult{LogChan: logChan, ErrChan: errChan, DoneChan: doneChan}
+	}
+
+	// All containers must be from the same project
+	project := containers[0].ComposeProject
+	for _, cont := range containers {
+		if cont.ComposeProject != project {
+			errChan := make(chan error, 1)
+			logChan := make(chan OperationLog)
+			doneChan := make(chan struct{})
+			errChan <- fmt.Errorf("all containers must be from the same compose project")
+			close(errChan)
+			close(logChan)
+			close(doneChan)
+			return StreamingResult{LogChan: logChan, ErrChan: errChan, DoneChan: doneChan}
+		}
+	}
+
+	// Collect service names
+	var services []string
+	for _, cont := range containers {
+		if cont.ComposeService != "" {
+			services = append(services, cont.ComposeService)
+		}
+	}
+
+	if len(services) == 0 {
+		errChan := make(chan error, 1)
+		logChan := make(chan OperationLog)
+		doneChan := make(chan struct{})
+		errChan <- fmt.Errorf("no compose services found")
+		close(errChan)
+		close(logChan)
+		close(doneChan)
+		return StreamingResult{LogChan: logChan, ErrChan: errChan, DoneChan: doneChan}
+	}
+
+	logChan := make(chan OperationLog, 100)
+	errChan := make(chan error, 1)
+	doneChan := make(chan struct{})
+
+	go func() {
+		defer close(logChan)
+		defer close(errChan)
+		defer close(doneChan)
+
+		baseArgs, workingDir := getComposeBaseArgs(containers[0])
+
+		// Phase 1: Build all services
+		logChan <- OperationLog{
+			Timestamp: time.Now(),
+			Stream:    "system",
+			Content:   fmt.Sprintf("--- Building %d services (no-cache) ---", len(services)),
+		}
+
+		buildArgs := append(baseArgs, "build", "--no-cache", "--progress=plain")
+		buildArgs = append(buildArgs, services...)
+		buildCmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, buildArgs...)...)
+		if workingDir != "" {
+			buildCmd.Dir = workingDir
+		}
+
+		buildResult := runStreamingCommand(ctx, buildCmd)
+
+		// Forward build logs
+		var buildErr error
+	buildLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case log, ok := <-buildResult.LogChan:
+				if !ok {
+					break buildLoop
+				}
+				logChan <- log
+			case err := <-buildResult.ErrChan:
+				if err != nil {
+					buildErr = err
+				}
+			}
+		}
+
+		// Wait for build done
+		<-buildResult.DoneChan
+
+		if buildErr != nil {
+			logChan <- OperationLog{
+				Timestamp: time.Now(),
+				Stream:    "stderr",
+				Content:   fmt.Sprintf("--- Build failed: %v ---", buildErr),
+			}
+			errChan <- buildErr
+			return
+		}
+
+		logChan <- OperationLog{
+			Timestamp: time.Now(),
+			Stream:    "system",
+			Content:   "--- Build complete, starting containers ---",
+		}
+
+		// Phase 2: Up all services
+		upArgs := append(baseArgs, "up", "-d")
+		upArgs = append(upArgs, services...)
+		upCmd := exec.CommandContext(ctx, "docker", append([]string{"compose"}, upArgs...)...)
+		if workingDir != "" {
+			upCmd.Dir = workingDir
+		}
+
+		upResult := runStreamingCommand(ctx, upCmd)
+
+		// Forward up logs
+		var upErr error
+	upLoop:
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case log, ok := <-upResult.LogChan:
+				if !ok {
+					break upLoop
+				}
+				logChan <- log
+			case err := <-upResult.ErrChan:
+				if err != nil {
+					upErr = err
+				}
+			}
+		}
+
+		// Wait for up done
+		<-upResult.DoneChan
+
+		if upErr != nil {
+			logChan <- OperationLog{
+				Timestamp: time.Now(),
+				Stream:    "stderr",
+				Content:   fmt.Sprintf("--- Up failed: %v ---", upErr),
+			}
+			errChan <- upErr
+			return
+		}
+
+		logChan <- OperationLog{
+			Timestamp: time.Now(),
+			Stream:    "system",
+			Content:   fmt.Sprintf("--- %d containers started successfully ---", len(services)),
+		}
+	}()
+
+	return StreamingResult{
+		LogChan:  logChan,
+		ErrChan:  errChan,
+		DoneChan: doneChan,
+	}
+}
+
 // ComposeBuildUpStream runs docker compose build --no-cache then up -d with streaming output
 func (c *Client) ComposeBuildUpStream(ctx context.Context, cont Container) StreamingResult {
 	if cont.ComposeProject == "" || cont.ComposeService == "" {

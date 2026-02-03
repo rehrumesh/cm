@@ -53,9 +53,10 @@ type buildCompleteMsg struct {
 }
 
 type buildStreamStartedMsg struct {
-	stream   docker.StreamingResult
-	target   docker.Container
-	op       string
+	stream       docker.StreamingResult
+	targets      []docker.Container
+	serviceNames string // Display name(s) for the build panel
+	op           string
 }
 
 // Model represents the container discovery screen
@@ -77,7 +78,7 @@ type Model struct {
 	tutorial           common.Tutorial
 	buildPanel         common.BuildPanel
 	buildStream        *docker.StreamingResult
-	buildTarget        docker.Container
+	buildTargets       []docker.Container
 }
 
 type listItem struct {
@@ -187,8 +188,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	// Handle build stream started
 	if streamMsg, ok := msg.(buildStreamStartedMsg); ok {
 		m.buildStream = &streamMsg.stream
-		m.buildTarget = streamMsg.target
-		m.buildPanel.Start(streamMsg.op, streamMsg.target.ComposeService)
+		m.buildTargets = streamMsg.targets
+		m.buildPanel.Start(streamMsg.op, streamMsg.serviceNames)
 		// Set initial panel size
 		panelWidth := m.width * 40 / 100
 		if panelWidth < 40 {
@@ -513,26 +514,46 @@ func (m Model) doStreamingBuild(op string, targets []docker.Container) tea.Cmd {
 		return nil
 	}
 
-	// For now, only support single target for streaming build panel
-	// Multiple targets fall back to non-streaming bulk action
-	if len(targets) > 1 {
-		return m.doAction(op, targets, m.dockerClient.ComposeBuildUp)
+	// Validate all targets are compose services
+	for _, target := range targets {
+		if target.ComposeProject == "" || target.ComposeService == "" {
+			return m.toast.Show("Cannot build", "Not a compose service", common.ToastError)
+		}
 	}
 
-	target := targets[0]
-	if target.ComposeProject == "" || target.ComposeService == "" {
-		return m.toast.Show("Cannot build", "Not a compose service", common.ToastError)
+	// Check all targets are from the same project (required for multi-service build)
+	if len(targets) > 1 {
+		project := targets[0].ComposeProject
+		for _, target := range targets[1:] {
+			if target.ComposeProject != project {
+				return m.toast.Show("Cannot build", "Services must be from the same project", common.ToastError)
+			}
+		}
+	}
+
+	// Build service names display string
+	var serviceNames string
+	if len(targets) == 1 {
+		serviceNames = targets[0].ComposeService
+	} else {
+		serviceNames = fmt.Sprintf("%d services", len(targets))
 	}
 
 	m.actionRunning = true
-	m.actionStatus = fmt.Sprintf("Building %s...", target.ComposeService)
+	m.actionStatus = fmt.Sprintf("Building %s...", serviceNames)
 
 	return func() tea.Msg {
-		stream := m.dockerClient.ComposeBuildUpStream(context.Background(), target)
+		var stream docker.StreamingResult
+		if len(targets) == 1 {
+			stream = m.dockerClient.ComposeBuildUpStream(context.Background(), targets[0])
+		} else {
+			stream = m.dockerClient.ComposeBuildUpStreamMulti(context.Background(), targets)
+		}
 		return buildStreamStartedMsg{
-			stream: stream,
-			target: target,
-			op:     op,
+			stream:       stream,
+			targets:      targets,
+			serviceNames: serviceNames,
+			op:           op,
 		}
 	}
 }
