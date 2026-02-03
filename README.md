@@ -311,6 +311,15 @@ go get -u ./...
 go mod tidy
 ```
 
+## Releasing
+
+1. Ensure all changes are committed and pushed to `main`
+2. Create a GitHub release with the next semantic version:
+   ```bash
+   gh release create v1.x.0 --title "v1.x.0" --notes "Release notes here"
+   ```
+3. Update the Homebrew formula at `rehrumesh/homebrew-tap` with the new version
+
 ## Troubleshooting
 
 ### "Docker daemon not reachable"
