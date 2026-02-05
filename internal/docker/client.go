@@ -2,6 +2,7 @@ package docker
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -427,7 +428,10 @@ func (c *Client) InspectContainer(ctx context.Context, containerID string) (*Con
 
 	// Get environment variables (filter sensitive ones)
 	for _, env := range info.Config.Env {
-		// Skip common sensitive environment variables
+		// Store raw env for optional viewing
+		details.RawEnv = append(details.RawEnv, env)
+
+		// Redact sensitive environment variables
 		lower := strings.ToLower(env)
 		if strings.Contains(lower, "password") || strings.Contains(lower, "secret") ||
 			strings.Contains(lower, "token") || strings.Contains(lower, "key") ||
@@ -469,6 +473,128 @@ func (c *Client) InspectContainer(ctx context.Context, containerID string) (*Con
 func (c *Client) RestartContainer(ctx context.Context, containerID string) error {
 	timeout := 10 // seconds
 	return c.cli.ContainerRestart(ctx, containerID, container.StopOptions{Timeout: &timeout})
+}
+
+// StreamStats streams container resource stats
+func (c *Client) StreamStats(ctx context.Context, containerID string) (<-chan ContainerStats, <-chan error) {
+	statsChan := make(chan ContainerStats, 10)
+	errChan := make(chan error, 1)
+
+	go func() {
+		defer close(statsChan)
+		defer close(errChan)
+
+		resp, err := c.cli.ContainerStats(ctx, containerID, true)
+		if err != nil {
+			errChan <- fmt.Errorf("failed to get container stats: %w", err)
+			return
+		}
+		defer resp.Body.Close()
+
+		decoder := json.NewDecoder(resp.Body)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				var statsJSON container.StatsResponse
+				if err := decoder.Decode(&statsJSON); err != nil {
+					if err != context.Canceled && ctx.Err() == nil {
+						errChan <- err
+					}
+					return
+				}
+
+				stats := ContainerStats{
+					Timestamp: time.Now(),
+				}
+
+				// Calculate CPU percentage
+				cpuDelta := float64(statsJSON.CPUStats.CPUUsage.TotalUsage - statsJSON.PreCPUStats.CPUUsage.TotalUsage)
+				systemDelta := float64(statsJSON.CPUStats.SystemUsage - statsJSON.PreCPUStats.SystemUsage)
+				if systemDelta > 0 && cpuDelta > 0 {
+					cpuCount := float64(statsJSON.CPUStats.OnlineCPUs)
+					if cpuCount == 0 {
+						cpuCount = float64(len(statsJSON.CPUStats.CPUUsage.PercpuUsage))
+					}
+					if cpuCount == 0 {
+						cpuCount = 1
+					}
+					stats.CPUPercent = (cpuDelta / systemDelta) * cpuCount * 100.0
+				}
+
+				// Memory stats
+				stats.MemoryUsage = statsJSON.MemoryStats.Usage
+				stats.MemoryLimit = statsJSON.MemoryStats.Limit
+				if stats.MemoryLimit > 0 {
+					stats.MemoryPercent = float64(stats.MemoryUsage) / float64(stats.MemoryLimit) * 100.0
+				}
+
+				// Network stats
+				for _, netStats := range statsJSON.Networks {
+					stats.NetworkRx += netStats.RxBytes
+					stats.NetworkTx += netStats.TxBytes
+				}
+
+				// PIDs
+				stats.PIDs = statsJSON.PidsStats.Current
+
+				select {
+				case statsChan <- stats:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+
+	return statsChan, errChan
+}
+
+// GetTopProcesses returns running processes in a container
+func (c *Client) GetTopProcesses(ctx context.Context, containerID string) ([]ContainerProcess, error) {
+	top, err := c.cli.ContainerTop(ctx, containerID, []string{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get container processes: %w", err)
+	}
+
+	// Find column indices
+	var pidIdx, userIdx, timeIdx, cmdIdx int = -1, -1, -1, -1
+	for i, title := range top.Titles {
+		switch strings.ToUpper(title) {
+		case "PID":
+			pidIdx = i
+		case "USER", "UID":
+			userIdx = i
+		case "TIME":
+			timeIdx = i
+		case "CMD", "COMMAND":
+			cmdIdx = i
+		}
+	}
+
+	var processes []ContainerProcess
+	for _, proc := range top.Processes {
+		p := ContainerProcess{}
+		if pidIdx >= 0 && pidIdx < len(proc) {
+			p.PID = proc[pidIdx]
+		}
+		if userIdx >= 0 && userIdx < len(proc) {
+			p.User = proc[userIdx]
+		}
+		if timeIdx >= 0 && timeIdx < len(proc) {
+			p.Time = proc[timeIdx]
+		}
+		if cmdIdx >= 0 && cmdIdx < len(proc) {
+			p.Command = proc[cmdIdx]
+		} else if len(proc) > 0 {
+			// If no command column found, use the last column
+			p.Command = proc[len(proc)-1]
+		}
+		processes = append(processes, p)
+	}
+
+	return processes, nil
 }
 
 // StartContainer starts a stopped container

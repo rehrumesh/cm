@@ -140,4 +140,50 @@ var (
 				Background(errorColor).
 				Padding(0, 2).
 				MarginRight(1)
+
+	// Tab bar styles for maximized container view
+	TabBarStyle = lipgloss.NewStyle().
+			Background(lipgloss.Color("236")).
+			Padding(0, 1)
+
+	TabActiveStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("235")).
+			Background(primaryColor).
+			Bold(true).
+			Padding(0, 2)
+
+	TabInactiveStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("252")).
+				Background(lipgloss.Color("238")).
+				Padding(0, 2)
+
+	TabSeparatorStyle = lipgloss.NewStyle().
+				Foreground(lipgloss.Color("240"))
+
+	// Stats tab specific styles
+	StatsLabelStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")).
+			Bold(true)
+
+	StatsValueStyle = lipgloss.NewStyle().
+			Foreground(successColor)
+
+	// Env/Config tab styles
+	EnvKeyStyle = lipgloss.NewStyle().
+			Foreground(primaryColor)
+
+	EnvValueStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252"))
+
+	EnvRedactedStyle = lipgloss.NewStyle().
+				Foreground(mutedColor).
+				Italic(true)
+
+	// Top tab styles
+	TopHeaderStyle = lipgloss.NewStyle().
+			Foreground(primaryColor).
+			Bold(true)
+
+	TopRowStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252"))
 )

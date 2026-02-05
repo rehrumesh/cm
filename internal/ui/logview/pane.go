@@ -135,6 +135,17 @@ type Pane struct {
 	buildLogs      []docker.OperationLog
 	buildOperation string // "build", "up", "down"
 	buildStatus    string // "running", "success", "error"
+
+	// Tab state (for maximized mode)
+	activeTab        TabType
+	statsHistory     *StatsHistory
+	processes        []docker.ContainerProcess
+	containerDetails *docker.ContainerDetails
+	detailsLoaded    bool
+	// Scroll offset for tab content
+	tabScrollOffset int
+	// Show redacted environment variables
+	showRedactedEnv bool
 }
 
 // NewPane creates a new log pane for a container
@@ -143,14 +154,16 @@ func NewPane(container docker.Container, width, height int) Pane {
 	vp.Style = lipgloss.NewStyle()
 
 	return Pane{
-		ID:         container.ID,
-		Container:  container,
-		Viewport:   vp,
-		LogLines:   make([]docker.LogLine, 0, maxLogLines),
-		Active:     false,
-		Connected:  true,
-		lastWidth:  width,
-		lastHeight: height,
+		ID:           container.ID,
+		Container:    container,
+		Viewport:     vp,
+		LogLines:     make([]docker.LogLine, 0, maxLogLines),
+		Active:       false,
+		Connected:    true,
+		lastWidth:    width,
+		lastHeight:   height,
+		activeTab:    TabLogs,
+		statsHistory: NewStatsHistory(),
 	}
 }
 
@@ -1291,4 +1304,466 @@ func (p *Pane) View(width, height int, focused bool) (result string) {
 		MaxWidth(width).
 		MaxHeight(height).
 		Render(rendered)
+}
+
+// Tab management methods
+
+// GetActiveTab returns the current active tab
+func (p *Pane) GetActiveTab() TabType {
+	return p.activeTab
+}
+
+// SetActiveTab sets the active tab
+func (p *Pane) SetActiveTab(tab TabType) {
+	p.activeTab = tab
+	p.tabScrollOffset = 0 // Reset scroll when changing tabs
+}
+
+// NextTab cycles to the next tab
+func (p *Pane) NextTab() TabType {
+	p.activeTab = TabType((int(p.activeTab) + 1) % TabCount())
+	p.tabScrollOffset = 0
+	return p.activeTab
+}
+
+// PrevTab cycles to the previous tab
+func (p *Pane) PrevTab() TabType {
+	p.activeTab = TabType((int(p.activeTab) - 1 + TabCount()) % TabCount())
+	p.tabScrollOffset = 0
+	return p.activeTab
+}
+
+// AddStats adds a stats sample to the history
+func (p *Pane) AddStats(stats docker.ContainerStats) {
+	if p.statsHistory != nil {
+		p.statsHistory.Add(stats)
+	}
+}
+
+// SetProcesses updates the process list
+func (p *Pane) SetProcesses(processes []docker.ContainerProcess) {
+	p.processes = processes
+}
+
+// SetContainerDetails sets the cached container details
+func (p *Pane) SetContainerDetails(details *docker.ContainerDetails) {
+	p.containerDetails = details
+	p.detailsLoaded = true
+}
+
+// NeedsDetails returns true if container details haven't been loaded yet
+func (p *Pane) NeedsDetails() bool {
+	return !p.detailsLoaded
+}
+
+// ScrollTabUp scrolls the tab content up
+func (p *Pane) ScrollTabUp(amount int) {
+	p.tabScrollOffset -= amount
+	if p.tabScrollOffset < 0 {
+		p.tabScrollOffset = 0
+	}
+}
+
+// ScrollTabDown scrolls the tab content down
+func (p *Pane) ScrollTabDown(amount int) {
+	p.tabScrollOffset += amount
+}
+
+// renderTabBar renders the tab navigation bar
+func (p *Pane) renderTabBar(width int) string {
+	var tabs []string
+
+	for i, name := range TabNames {
+		var style lipgloss.Style
+		if TabType(i) == p.activeTab {
+			style = common.TabActiveStyle
+		} else {
+			style = common.TabInactiveStyle
+		}
+		// Add number prefix
+		tabLabel := fmt.Sprintf("%d:%s", i+1, name)
+		tabs = append(tabs, style.Render(tabLabel))
+	}
+
+	tabBar := strings.Join(tabs, common.TabSeparatorStyle.Render(" "))
+
+	// Center the tab bar
+	tabBarWidth := lipgloss.Width(tabBar)
+	if tabBarWidth < width {
+		padding := (width - tabBarWidth) / 2
+		tabBar = strings.Repeat(" ", padding) + tabBar
+	}
+
+	return common.TabBarStyle.Width(width).Render(tabBar)
+}
+
+// renderStatsTab renders the Stats tab content
+func (p *Pane) renderStatsTab(width, height int) string {
+	if p.statsHistory == nil || p.statsHistory.Len() == 0 {
+		return common.SubtitleStyle.Render("  Waiting for stats data...")
+	}
+
+	latest := p.statsHistory.Latest()
+	if latest == nil {
+		return common.SubtitleStyle.Render("  No stats available")
+	}
+
+	var b strings.Builder
+
+	// Render bar charts for CPU and Memory
+	memUsage := FormatBytes(latest.MemoryUsage)
+	memLimit := FormatBytes(latest.MemoryLimit)
+
+	bars := RenderBarCharts(latest.CPUPercent, latest.MemoryPercent, memUsage, memLimit, width-4, height-6)
+	b.WriteString(bars)
+	b.WriteString("\n\n")
+
+	// Stats summary at bottom
+	labelStyle := common.StatsLabelStyle
+	valueStyle := common.StatsValueStyle
+
+	b.WriteString(fmt.Sprintf("  %s %s    %s %d\n",
+		labelStyle.Render("Network I/O:"),
+		valueStyle.Render(fmt.Sprintf("%s rx / %s tx", FormatBytes(latest.NetworkRx), FormatBytes(latest.NetworkTx))),
+		labelStyle.Render("PIDs:"),
+		latest.PIDs,
+	))
+
+	return b.String()
+}
+
+// ToggleRedactedEnv toggles showing/hiding redacted environment variables
+func (p *Pane) ToggleRedactedEnv() {
+	p.showRedactedEnv = !p.showRedactedEnv
+}
+
+// IsShowingRedactedEnv returns whether redacted env vars are being shown
+func (p *Pane) IsShowingRedactedEnv() bool {
+	return p.showRedactedEnv
+}
+
+// renderEnvTab renders the Env tab content
+func (p *Pane) renderEnvTab(width, height int) string {
+	if p.containerDetails == nil {
+		return common.SubtitleStyle.Render("  Loading environment variables...")
+	}
+
+	if len(p.containerDetails.Env) == 0 {
+		return common.SubtitleStyle.Render("  No environment variables set")
+	}
+
+	var b strings.Builder
+
+	// Header with toggle hint
+	header := "Environment Variables"
+	if p.showRedactedEnv {
+		header += " (showing secrets)"
+	}
+	b.WriteString(fmt.Sprintf("  %s\n", common.StatsLabelStyle.Render(header)))
+	b.WriteString(fmt.Sprintf("  %s\n\n", common.MutedInlineStyle.Render("[s] show/hide secrets")))
+
+	// Choose which env list to display
+	lines := p.containerDetails.Env
+	if p.showRedactedEnv {
+		lines = p.containerDetails.RawEnv
+	}
+
+	// Apply scroll offset
+	startIdx := p.tabScrollOffset
+	if startIdx >= len(lines) {
+		startIdx = len(lines) - 1
+	}
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	endIdx := startIdx + height - 6 // Account for header lines
+	if endIdx > len(lines) {
+		endIdx = len(lines)
+	}
+
+	for i := startIdx; i < endIdx; i++ {
+		env := lines[i]
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) == 2 {
+			key := parts[0]
+			value := parts[1]
+
+			// Check if value is redacted (only in redacted mode)
+			if value == "<redacted>" {
+				b.WriteString(fmt.Sprintf("  %s=%s\n",
+					common.EnvKeyStyle.Render(key),
+					common.EnvRedactedStyle.Render(value),
+				))
+			} else {
+				// Truncate long values
+				maxValueLen := width - len(key) - 6
+				if maxValueLen < 10 {
+					maxValueLen = 10
+				}
+				if len(value) > maxValueLen {
+					value = value[:maxValueLen-3] + "..."
+				}
+				b.WriteString(fmt.Sprintf("  %s=%s\n",
+					common.EnvKeyStyle.Render(key),
+					common.EnvValueStyle.Render(value),
+				))
+			}
+		} else {
+			b.WriteString(fmt.Sprintf("  %s\n", env))
+		}
+	}
+
+	// Scroll indicator
+	if len(lines) > height-6 {
+		b.WriteString(fmt.Sprintf("\n  [%d-%d of %d] (use arrows to scroll)",
+			startIdx+1, endIdx, len(lines)))
+	}
+
+	return b.String()
+}
+
+// renderConfigTab renders the Config tab content
+func (p *Pane) renderConfigTab(width, height int) string {
+	if p.containerDetails == nil {
+		return common.SubtitleStyle.Render("Loading container configuration...")
+	}
+
+	d := p.containerDetails
+	var lines []string
+
+	// Build all config lines
+	lines = append(lines, "")
+	lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Container ID:"), d.ID))
+	lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Name:        "), d.Name))
+	lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Image:       "), d.Image))
+	lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Status:      "), d.Status))
+	lines = append(lines, "")
+
+	// Times
+	if !d.Created.IsZero() {
+		lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Created:     "), d.Created.Format("2006-01-02 15:04:05")))
+	}
+	if !d.Started.IsZero() {
+		lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Started:     "), d.Started.Format("2006-01-02 15:04:05")))
+	}
+	lines = append(lines, "")
+
+	// Command info
+	if d.Entrypoint != "" {
+		lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Entrypoint:  "), truncateString(d.Entrypoint, width-20)))
+	}
+	if d.Command != "" {
+		lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Command:     "), truncateString(d.Command, width-20)))
+	}
+	if d.WorkingDir != "" {
+		lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("WorkingDir:  "), d.WorkingDir))
+	}
+	if d.RestartPolicy != "" {
+		lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Restart:     "), d.RestartPolicy))
+	}
+	lines = append(lines, "")
+
+	// Ports
+	if len(d.Ports) > 0 {
+		lines = append(lines, fmt.Sprintf("  %s", common.StatsLabelStyle.Render("Ports:")))
+		for _, port := range d.Ports {
+			lines = append(lines, fmt.Sprintf("    %s", port))
+		}
+		lines = append(lines, "")
+	}
+
+	// Volumes
+	if len(d.Volumes) > 0 {
+		lines = append(lines, fmt.Sprintf("  %s", common.StatsLabelStyle.Render("Volumes:")))
+		for _, vol := range d.Volumes {
+			lines = append(lines, fmt.Sprintf("    %s", truncateString(vol, width-6)))
+		}
+		lines = append(lines, "")
+	}
+
+	// Networks
+	if len(d.Networks) > 0 {
+		lines = append(lines, fmt.Sprintf("  %s  %s", common.StatsLabelStyle.Render("Networks:    "), strings.Join(d.Networks, ", ")))
+		lines = append(lines, "")
+	}
+
+	// Labels (limited)
+	if len(d.Labels) > 0 {
+		lines = append(lines, fmt.Sprintf("  %s", common.StatsLabelStyle.Render("Labels:")))
+		count := 0
+		for k, v := range d.Labels {
+			if count >= 10 {
+				lines = append(lines, fmt.Sprintf("    ... and %d more", len(d.Labels)-10))
+				break
+			}
+			lines = append(lines, fmt.Sprintf("    %s=%s", k, truncateString(v, width-len(k)-8)))
+			count++
+		}
+	}
+
+	// Apply scroll offset
+	startIdx := p.tabScrollOffset
+	if startIdx >= len(lines) {
+		startIdx = len(lines) - 1
+	}
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	endIdx := startIdx + height - 2
+	if endIdx > len(lines) {
+		endIdx = len(lines)
+	}
+
+	var b strings.Builder
+	for i := startIdx; i < endIdx; i++ {
+		b.WriteString(lines[i])
+		b.WriteString("\n")
+	}
+
+	// Scroll indicator
+	if len(lines) > height-2 {
+		b.WriteString(fmt.Sprintf("\n  [%d-%d of %d] (use arrows to scroll)",
+			startIdx+1, endIdx, len(lines)))
+	}
+
+	return b.String()
+}
+
+// renderTopTab renders the Top tab content
+func (p *Pane) renderTopTab(width, height int) string {
+	if len(p.processes) == 0 {
+		return common.SubtitleStyle.Render("  Loading processes...\n\n  (Container must be running)")
+	}
+
+	var b strings.Builder
+
+	// Header
+	headerFmt := "  %-8s %-10s %-10s %s\n"
+	b.WriteString(fmt.Sprintf(headerFmt,
+		common.TopHeaderStyle.Render("PID"),
+		common.TopHeaderStyle.Render("USER"),
+		common.TopHeaderStyle.Render("TIME"),
+		common.TopHeaderStyle.Render("COMMAND"),
+	))
+	b.WriteString("  " + strings.Repeat("-", width-4) + "\n")
+
+	// Apply scroll offset
+	startIdx := p.tabScrollOffset
+	if startIdx >= len(p.processes) {
+		startIdx = len(p.processes) - 1
+	}
+	if startIdx < 0 {
+		startIdx = 0
+	}
+
+	endIdx := startIdx + height - 5
+	if endIdx > len(p.processes) {
+		endIdx = len(p.processes)
+	}
+
+	rowFmt := "  %-8s %-10s %-10s %s\n"
+	for i := startIdx; i < endIdx; i++ {
+		proc := p.processes[i]
+		cmd := truncateString(proc.Command, width-35)
+		b.WriteString(fmt.Sprintf(rowFmt, proc.PID, proc.User, proc.Time, cmd))
+	}
+
+	// Scroll indicator
+	if len(p.processes) > height-5 {
+		b.WriteString(fmt.Sprintf("\n  [%d-%d of %d processes] (use arrows to scroll)",
+			startIdx+1, endIdx, len(p.processes)))
+	}
+
+	return b.String()
+}
+
+// ViewMaximized renders the pane in maximized mode with tabs
+func (p *Pane) ViewMaximized(width, height int) string {
+	// Tab bar takes 1 line, title takes 1 line, border takes 2 lines
+	tabBar := p.renderTabBar(width - 2)
+
+	// Container title/status line
+	var status string
+	if p.Container.State == "running" {
+		status = common.RunningStyle.Render("●")
+	} else {
+		status = common.StoppedStyle.Render("○")
+	}
+
+	title := p.Container.DisplayName()
+	if !p.Connected {
+		title += " (disconnected)"
+	}
+	if p.Paused && p.activeTab == TabLogs {
+		title += " [PAUSED]"
+	}
+
+	titleLine := fmt.Sprintf(" %s %s", status, title)
+	titleLine = lipgloss.NewStyle().
+		Bold(true).
+		Foreground(lipgloss.Color("252")).
+		Width(width - 2).
+		Render(titleLine)
+
+	// Content area height
+	contentHeight := height - 5 // borders (2) + tab bar (1) + title (1) + help hint (1)
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+
+	// Render content based on active tab
+	var content string
+	switch p.activeTab {
+	case TabLogs:
+		// Use existing viewport for logs
+		p.Viewport.Height = contentHeight
+		p.Viewport.Width = width - 4
+		content = p.Viewport.View()
+	case TabStats:
+		content = p.renderStatsTab(width-4, contentHeight)
+	case TabEnv:
+		content = p.renderEnvTab(width-4, contentHeight)
+	case TabConfig:
+		content = p.renderConfigTab(width-4, contentHeight)
+	case TabTop:
+		content = p.renderTopTab(width-4, contentHeight)
+	}
+
+	// Constrain content to height
+	content = lipgloss.NewStyle().
+		Width(width - 4).
+		Height(contentHeight).
+		MaxHeight(contentHeight).
+		Render(content)
+
+	// Hint line
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	hint := hintStyle.Render(" [/]:tabs  [1-5]:jump  arrows:scroll  esc:minimize")
+
+	// Combine all parts
+	innerContent := lipgloss.JoinVertical(lipgloss.Left,
+		tabBar,
+		titleLine,
+		content,
+		hint,
+	)
+
+	// Add border
+	return common.PaneActiveBorderStyle.
+		Width(width - 2).
+		Height(height - 2).
+		Render(innerContent)
+}
+
+// truncateString truncates a string to a maximum length
+func truncateString(s string, maxLen int) string {
+	if maxLen <= 3 {
+		return s
+	}
+	if len(s) > maxLen {
+		return s[:maxLen-3] + "..."
+	}
+	return s
 }

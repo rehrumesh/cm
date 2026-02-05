@@ -46,22 +46,43 @@ type ContainerGroup struct {
 
 // ContainerDetails contains detailed information about a container
 type ContainerDetails struct {
-	ID          string
-	Name        string
-	Image       string
-	Status      string
-	State       string
-	Created     time.Time
-	Started     time.Time
-	Ports       []string
-	Env         []string
-	Volumes     []string
-	Networks    []string
-	Labels      map[string]string
-	Command     string
-	Entrypoint  string
-	WorkingDir  string
+	ID            string
+	Name          string
+	Image         string
+	Status        string
+	State         string
+	Created       time.Time
+	Started       time.Time
+	Ports         []string
+	Env           []string   // Redacted environment variables
+	RawEnv        []string   // Original unredacted environment variables
+	Volumes       []string
+	Networks      []string
+	Labels        map[string]string
+	Command       string
+	Entrypoint    string
+	WorkingDir    string
 	RestartPolicy string
+}
+
+// ContainerStats contains resource usage statistics for a container
+type ContainerStats struct {
+	CPUPercent    float64
+	MemoryUsage   uint64
+	MemoryLimit   uint64
+	MemoryPercent float64
+	NetworkRx     uint64
+	NetworkTx     uint64
+	PIDs          uint64
+	Timestamp     time.Time
+}
+
+// ContainerProcess represents a running process in a container
+type ContainerProcess struct {
+	PID     string
+	User    string
+	Time    string
+	Command string
 }
 
 // composeFileHeader is used to parse just the name field from compose files

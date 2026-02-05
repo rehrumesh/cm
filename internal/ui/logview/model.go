@@ -82,6 +82,30 @@ type returnToLogsMsg struct {
 	ContainerID string
 }
 
+// StatsUpdateMsg is sent when new container stats are received
+type StatsUpdateMsg struct {
+	ContainerID string
+	Stats       docker.ContainerStats
+}
+
+// StatsErrorMsg is sent when stats streaming encounters an error
+type StatsErrorMsg struct {
+	ContainerID string
+	Err         error
+}
+
+// TopUpdateMsg is sent when process list is updated
+type TopUpdateMsg struct {
+	ContainerID string
+	Processes   []docker.ContainerProcess
+	Err         error
+}
+
+// topTickMsg triggers a process list refresh
+type topTickMsg struct {
+	ContainerID string
+}
+
 // streamInfo holds the channels for a container's log stream
 type streamInfo struct {
 	logChan <-chan docker.LogLine
@@ -153,6 +177,16 @@ type Model struct {
 
 	// Build streams for panes in build mode
 	buildStreams map[string]*docker.StreamingResult // containerID -> stream
+
+	// Stats streaming state
+	statsCtx         context.Context
+	statsCancel      context.CancelFunc
+	statsStreaming   bool
+	statsChan        <-chan docker.ContainerStats
+	statsContainerID string
+
+	// Top polling state
+	topPolling bool
 }
 
 // New creates a new log view model
@@ -500,6 +534,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, m.keys.Back):
 			// If a pane is maximized, un-maximize it first
 			if m.maximizedPane != -1 {
+				// Stop any active tab streaming when un-maximizing
+				m.stopStatsStreaming()
+				m.stopTopPolling()
 				m.maximizedPane = -1
 				m.recalculateLayout()
 				return m, nil
@@ -532,7 +569,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			// Toggle maximize on current pane
 			if m.maximizedPane == -1 {
 				m.maximizedPane = m.focusedPane
+				// Reset tab to Logs when maximizing
+				if m.focusedPane >= 0 && m.focusedPane < len(m.panes) {
+					m.panes[m.focusedPane].SetActiveTab(TabLogs)
+				}
 			} else {
+				// Stop any active tab streaming when un-maximizing
+				m.stopStatsStreaming()
+				m.stopTopPolling()
 				m.maximizedPane = -1
 			}
 			m.recalculateLayout()
@@ -546,7 +590,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.maximizedPane != -1 {
 				// Scroll up when maximized
 				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
-					m.panes[m.maximizedPane].Viewport.SetYOffset(m.panes[m.maximizedPane].Viewport.YOffset - 1)
+					pane := &m.panes[m.maximizedPane]
+					if pane.GetActiveTab() == TabLogs {
+						pane.Viewport.SetYOffset(pane.Viewport.YOffset - 1)
+					} else {
+						pane.ScrollTabUp(1)
+					}
 				}
 			} else {
 				m.focusUp()
@@ -556,7 +605,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.maximizedPane != -1 {
 				// Scroll down when maximized
 				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
-					m.panes[m.maximizedPane].Viewport.SetYOffset(m.panes[m.maximizedPane].Viewport.YOffset + 1)
+					pane := &m.panes[m.maximizedPane]
+					if pane.GetActiveTab() == TabLogs {
+						pane.Viewport.SetYOffset(pane.Viewport.YOffset + 1)
+					} else {
+						pane.ScrollTabDown(1)
+					}
 				}
 			} else {
 				m.focusDown()
@@ -564,9 +618,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Left):
 			if m.maximizedPane != -1 {
-				// Scroll left when maximized (horizontal scroll)
+				// Scroll left when maximized (horizontal scroll for logs, or prev tab)
 				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
-					m.panes[m.maximizedPane].ScrollLeft(10)
+					pane := &m.panes[m.maximizedPane]
+					if pane.GetActiveTab() == TabLogs {
+						pane.ScrollLeft(10)
+					}
 				}
 			} else {
 				m.focusLeft()
@@ -578,9 +635,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, m.keys.Right):
 			if m.maximizedPane != -1 {
-				// Scroll right when maximized (horizontal scroll)
+				// Scroll right when maximized (horizontal scroll for logs, or next tab)
 				if m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
-					m.panes[m.maximizedPane].ScrollRight(10)
+					pane := &m.panes[m.maximizedPane]
+					if pane.GetActiveTab() == TabLogs {
+						pane.ScrollRight(10)
+					}
 				}
 			} else {
 				m.focusRight()
@@ -805,46 +865,61 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				cmds = append(cmds, m.toast.Show("Logs "+status, m.panes[paneIdx].Container.DisplayName(), common.ToastSuccess))
 			}
 
-		// Pane number shortcuts (1-9)
+		// Pane number shortcuts (1-9) - but in maximized mode, 1-5 switch tabs instead
 		case key.Matches(msg, m.keys.Pane1):
-			if len(m.panes) >= 1 {
-				m.setFocus(0)
-				if m.maximizedPane != -1 {
-					m.maximizedPane = 0
-					m.recalculateLayout()
+			if m.maximizedPane != -1 && m.maximizedPane < len(m.panes) {
+				// In maximized mode: switch to Logs tab
+				pane := &m.panes[m.maximizedPane]
+				cmd := m.switchToTab(pane, TabLogs)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
 				}
+			} else if len(m.panes) >= 1 {
+				m.setFocus(0)
 			}
 		case key.Matches(msg, m.keys.Pane2):
-			if len(m.panes) >= 2 {
-				m.setFocus(1)
-				if m.maximizedPane != -1 {
-					m.maximizedPane = 1
-					m.recalculateLayout()
+			if m.maximizedPane != -1 && m.maximizedPane < len(m.panes) {
+				// In maximized mode: switch to Stats tab
+				pane := &m.panes[m.maximizedPane]
+				cmd := m.switchToTab(pane, TabStats)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
 				}
+			} else if len(m.panes) >= 2 {
+				m.setFocus(1)
 			}
 		case key.Matches(msg, m.keys.Pane3):
-			if len(m.panes) >= 3 {
-				m.setFocus(2)
-				if m.maximizedPane != -1 {
-					m.maximizedPane = 2
-					m.recalculateLayout()
+			if m.maximizedPane != -1 && m.maximizedPane < len(m.panes) {
+				// In maximized mode: switch to Env tab
+				pane := &m.panes[m.maximizedPane]
+				cmd := m.switchToTab(pane, TabEnv)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
 				}
+			} else if len(m.panes) >= 3 {
+				m.setFocus(2)
 			}
 		case key.Matches(msg, m.keys.Pane4):
-			if len(m.panes) >= 4 {
-				m.setFocus(3)
-				if m.maximizedPane != -1 {
-					m.maximizedPane = 3
-					m.recalculateLayout()
+			if m.maximizedPane != -1 && m.maximizedPane < len(m.panes) {
+				// In maximized mode: switch to Config tab
+				pane := &m.panes[m.maximizedPane]
+				cmd := m.switchToTab(pane, TabConfig)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
 				}
+			} else if len(m.panes) >= 4 {
+				m.setFocus(3)
 			}
 		case key.Matches(msg, m.keys.Pane5):
-			if len(m.panes) >= 5 {
-				m.setFocus(4)
-				if m.maximizedPane != -1 {
-					m.maximizedPane = 4
-					m.recalculateLayout()
+			if m.maximizedPane != -1 && m.maximizedPane < len(m.panes) {
+				// In maximized mode: switch to Top tab
+				pane := &m.panes[m.maximizedPane]
+				cmd := m.switchToTab(pane, TabTop)
+				if cmd != nil {
+					cmds = append(cmds, cmd)
 				}
+			} else if len(m.panes) >= 5 {
+				m.setFocus(4)
 			}
 		case key.Matches(msg, m.keys.Pane6):
 			if len(m.panes) >= 6 {
@@ -901,6 +976,86 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.layout.ResetRatios()
 				m.recalculateLayout()
 				cmds = append(cmds, m.toast.Show("Layout", "Reset to equal", common.ToastSuccess))
+			}
+
+		// Tab cycling with [ and ], and 'r' for redacted toggle (only in maximized mode)
+		default:
+			if m.maximizedPane != -1 && m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+				pane := &m.panes[m.maximizedPane]
+				keyStr := msg.String()
+
+				if keyStr == "[" {
+					oldTab := pane.GetActiveTab()
+					newTab := pane.PrevTab()
+					if oldTab != newTab {
+						cmd := m.handleTabSwitch(pane, oldTab, newTab)
+						if cmd != nil {
+							cmds = append(cmds, cmd)
+						}
+					}
+				}
+				if keyStr == "]" {
+					oldTab := pane.GetActiveTab()
+					newTab := pane.NextTab()
+					if oldTab != newTab {
+						cmd := m.handleTabSwitch(pane, oldTab, newTab)
+						if cmd != nil {
+							cmds = append(cmds, cmd)
+						}
+					}
+				}
+				// Toggle showing redacted env vars (only on Env tab)
+				if keyStr == "s" && pane.GetActiveTab() == TabEnv {
+					pane.ToggleRedactedEnv()
+				}
+			}
+		}
+
+	case StatsUpdateMsg:
+		// Handle stats update
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID {
+				m.panes[i].AddStats(msg.Stats)
+				// Continue listening for more stats if still streaming
+				if m.statsStreaming && m.statsChan != nil {
+					cmds = append(cmds, m.waitForStats(msg.ContainerID, m.statsChan))
+				}
+				break
+			}
+		}
+
+	case containerDetailsLoadedMsg:
+		// Handle container details loaded for Env/Config tabs
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID {
+				m.panes[i].SetContainerDetails(msg.Details)
+				break
+			}
+		}
+
+	case StatsErrorMsg:
+		// Handle stats error - stop streaming
+		m.stopStatsStreaming()
+		debug.Log("Stats streaming error for %s: %v", msg.ContainerID, msg.Err)
+
+	case TopUpdateMsg:
+		// Handle process list update
+		for i := range m.panes {
+			if m.panes[i].ID == msg.ContainerID {
+				if msg.Err == nil {
+					m.panes[i].SetProcesses(msg.Processes)
+				}
+				break
+			}
+		}
+
+	case topTickMsg:
+		// Refresh process list if still polling
+		if m.topPolling && m.maximizedPane >= 0 && m.maximizedPane < len(m.panes) {
+			pane := &m.panes[m.maximizedPane]
+			if pane.ID == msg.ContainerID && pane.GetActiveTab() == TabTop {
+				cmds = append(cmds, m.fetchTopProcesses(pane.Container))
+				cmds = append(cmds, m.scheduleTopTick(pane.ID))
 			}
 		}
 
@@ -1645,9 +1800,10 @@ func (m Model) View() (result string) {
 		if tutorialBar != "" {
 			paneHeight--
 		}
-		pane := m.panes[m.maximizedPane]
-		paneView := pane.View(m.width, paneHeight, true)
-		helpBar := m.renderHelpBar()
+		pane := &m.panes[m.maximizedPane]
+		// Use ViewMaximized for tabbed view
+		paneView := pane.ViewMaximized(m.width, paneHeight)
+		helpBar := m.renderHelpBarMaximized()
 
 		// Build content with search bar at top
 		var parts []string
@@ -1919,6 +2075,46 @@ func (m Model) renderHelpBar() string {
 			desc("  ") + key("esc") + desc(":back") +
 			desc("  ") + key("q") + desc(":quit")
 	}
+
+	// Debug indicator on the right
+	var debugIndicator string
+	if debug.IsEnabled() {
+		debugIndicator = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("208")).
+			Bold(true).
+			Render("[DEBUG]")
+	}
+
+	// If debug is enabled, add it to the right side
+	if debugIndicator != "" {
+		helpWidth := lipgloss.Width(help)
+		debugWidth := lipgloss.Width(debugIndicator)
+		padding := m.width - helpWidth - debugWidth - 1
+		if padding > 0 {
+			help = help + strings.Repeat(" ", padding) + debugIndicator
+		} else {
+			help = help + " " + debugIndicator
+		}
+	}
+
+	return common.HelpBarStyle.Width(m.width).Render(help)
+}
+
+// renderHelpBarMaximized renders the help bar for maximized view with tab navigation
+func (m Model) renderHelpBarMaximized() string {
+	key := common.HelpKeyStyle.Render
+	desc := common.HelpDescStyle.Render
+
+	help := " " + key("1-5") + desc(":tabs") +
+		desc("  ") + key("[]") + desc(":cycle") +
+		desc("  ") + key("b") + desc(":build") +
+		desc("  ") + key("r") + desc(":restart") +
+		desc("  ") + key("e") + desc(":shell") +
+		desc("  ") + key("i") + desc(":inspect") +
+		desc("  ") + key("↑↓") + desc(":scroll") +
+		desc("  ") + key("?") + desc(":help") +
+		desc("  ") + key("esc") + desc(":min") +
+		desc("  ") + key("q") + desc(":quit")
 
 	// Debug indicator on the right
 	var debugIndicator string
@@ -2350,4 +2546,154 @@ func (m Model) scheduleReturnToLogs(containerID string) tea.Cmd {
 	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 		return returnToLogsMsg{ContainerID: containerID}
 	})
+}
+
+// Tab management helpers
+
+// switchToTab switches to a specific tab and handles streaming lifecycle
+func (m *Model) switchToTab(pane *Pane, newTab TabType) tea.Cmd {
+	oldTab := pane.GetActiveTab()
+	if oldTab == newTab {
+		return nil
+	}
+	pane.SetActiveTab(newTab)
+	return m.handleTabSwitch(pane, oldTab, newTab)
+}
+
+// handleTabSwitch handles the streaming lifecycle when switching tabs
+func (m *Model) handleTabSwitch(pane *Pane, oldTab, newTab TabType) tea.Cmd {
+	var cmds []tea.Cmd
+
+	// Stop streaming for old tab
+	switch oldTab {
+	case TabStats:
+		m.stopStatsStreaming()
+	case TabTop:
+		m.stopTopPolling()
+	}
+
+	// Start streaming/fetching for new tab
+	switch newTab {
+	case TabStats:
+		if pane.Container.State == "running" {
+			cmds = append(cmds, m.startStatsStreaming(pane.Container))
+		}
+	case TabEnv, TabConfig:
+		if pane.NeedsDetails() {
+			cmds = append(cmds, m.fetchContainerDetails(pane.Container))
+		}
+	case TabTop:
+		if pane.Container.State == "running" {
+			cmds = append(cmds, m.startTopPolling(pane.Container))
+		}
+	}
+
+	if len(cmds) == 0 {
+		return nil
+	}
+	return tea.Batch(cmds...)
+}
+
+// startStatsStreaming starts the stats streaming for a container
+func (m *Model) startStatsStreaming(cont docker.Container) tea.Cmd {
+	// Cancel any existing stats streaming
+	m.stopStatsStreaming()
+
+	// Create a new context for stats streaming
+	m.statsCtx, m.statsCancel = context.WithCancel(m.ctx)
+	m.statsStreaming = true
+	m.statsContainerID = cont.ID
+
+	statsChan, errChan := m.dockerClient.StreamStats(m.statsCtx, cont.ID)
+	m.statsChan = statsChan
+	return tea.Batch(
+		m.waitForStats(cont.ID, statsChan),
+		m.waitForStatsError(cont.ID, errChan),
+	)
+}
+
+// stopStatsStreaming stops the current stats streaming
+func (m *Model) stopStatsStreaming() {
+	if m.statsCancel != nil {
+		m.statsCancel()
+		m.statsCancel = nil
+	}
+	m.statsStreaming = false
+	m.statsChan = nil
+	m.statsContainerID = ""
+}
+
+// waitForStats waits for stats from the stats channel
+func (m Model) waitForStats(containerID string, statsChan <-chan docker.ContainerStats) tea.Cmd {
+	return func() tea.Msg {
+		stats, ok := <-statsChan
+		if !ok {
+			return nil
+		}
+		return StatsUpdateMsg{ContainerID: containerID, Stats: stats}
+	}
+}
+
+// waitForStatsError waits for errors from the stats error channel
+func (m Model) waitForStatsError(containerID string, errChan <-chan error) tea.Cmd {
+	return func() tea.Msg {
+		err, ok := <-errChan
+		if !ok || err == nil {
+			return nil
+		}
+		return StatsErrorMsg{ContainerID: containerID, Err: err}
+	}
+}
+
+// startTopPolling starts polling for process list
+func (m *Model) startTopPolling(cont docker.Container) tea.Cmd {
+	m.topPolling = true
+	return tea.Batch(
+		m.fetchTopProcesses(cont),
+		m.scheduleTopTick(cont.ID),
+	)
+}
+
+// stopTopPolling stops the process list polling
+func (m *Model) stopTopPolling() {
+	m.topPolling = false
+}
+
+// fetchTopProcesses fetches the process list for a container
+func (m Model) fetchTopProcesses(cont docker.Container) tea.Cmd {
+	return func() tea.Msg {
+		processes, err := m.dockerClient.GetTopProcesses(m.ctx, cont.ID)
+		return TopUpdateMsg{
+			ContainerID: cont.ID,
+			Processes:   processes,
+			Err:         err,
+		}
+	}
+}
+
+// scheduleTopTick schedules the next process list refresh
+func (m Model) scheduleTopTick(containerID string) tea.Cmd {
+	return tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return topTickMsg{ContainerID: containerID}
+	})
+}
+
+// fetchContainerDetails fetches container details for Env/Config tabs
+func (m Model) fetchContainerDetails(cont docker.Container) tea.Cmd {
+	return func() tea.Msg {
+		details, err := m.dockerClient.InspectContainer(m.ctx, cont.ID)
+		if err != nil {
+			return nil
+		}
+		return containerDetailsLoadedMsg{
+			ContainerID: cont.ID,
+			Details:     details,
+		}
+	}
+}
+
+// containerDetailsLoadedMsg is sent when container details are loaded for tabs
+type containerDetailsLoadedMsg struct {
+	ContainerID string
+	Details     *docker.ContainerDetails
 }
