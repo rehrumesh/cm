@@ -77,7 +77,6 @@ var (
 
 	// Help bar styles for log view
 	HelpBarStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color("236")).
 			Foreground(lipgloss.Color("252"))
 
 	HelpKeyStyle = lipgloss.NewStyle().
@@ -107,16 +106,16 @@ var (
 			Padding(1, 2)
 
 	ModalTitleStyle = lipgloss.NewStyle().
-				Bold(true).
-				Foreground(primaryColor).
-				MarginBottom(1)
+			Bold(true).
+			Foreground(primaryColor).
+			MarginBottom(1)
 
 	ModalLabelStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color("252")).
-				Width(20)
+			Foreground(lipgloss.Color("252")).
+			Width(20)
 
 	ModalValueStyle = lipgloss.NewStyle().
-				Foreground(successColor)
+			Foreground(successColor)
 
 	ModalSelectedStyle = lipgloss.NewStyle().
 				Foreground(primaryColor).

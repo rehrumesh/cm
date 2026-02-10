@@ -303,6 +303,24 @@ func (m Model) waitForError(containerID string, errChan <-chan error) tea.Cmd {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
+	// Handle window resize even when any modal is open
+	if sizeMsg, ok := msg.(tea.WindowSizeMsg); ok {
+		m.width = sizeMsg.Width
+		m.height = sizeMsg.Height
+		m.configModal.SetSize(sizeMsg.Width, sizeMsg.Height)
+		m.helpModal.SetSize(sizeMsg.Width, sizeMsg.Height)
+		m.inspectModal.SetSize(sizeMsg.Width, sizeMsg.Height)
+		m.searchModal.SetSize(sizeMsg.Width, sizeMsg.Height)
+
+		// Debounce resize to prevent flickering
+		if !m.pendingResize {
+			m.pendingResize = true
+			return m, tea.Tick(resizeDebounceDelay, func(t time.Time) tea.Msg {
+				return resizeTickMsg{}
+			})
+		}
+	}
+
 	// Handle ContainerDetailsMsg even when inspect modal is visible
 	if detailsMsg, ok := msg.(common.ContainerDetailsMsg); ok {
 		m.inspectModal.SetDetails(detailsMsg.Details, detailsMsg.Err)
@@ -433,18 +451,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	}
 
 	switch msg := msg.(type) {
-	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m.configModal.SetSize(msg.Width, msg.Height)
-		// Debounce resize to prevent flickering
-		if !m.pendingResize {
-			m.pendingResize = true
-			return m, tea.Tick(resizeDebounceDelay, func(t time.Time) tea.Msg {
-				return resizeTickMsg{}
-			})
-		}
-
 	case resizeTickMsg:
 		m.pendingResize = false
 		// Only recalculate if dimensions actually changed
@@ -1824,31 +1830,19 @@ func (m Model) View() (result string) {
 	// Overlay inspect modal if visible
 	if m.inspectModal.IsVisible() {
 		modalView := m.inspectModal.View(m.width, m.height)
-		return lipgloss.Place(m.width, m.height,
-			lipgloss.Left, lipgloss.Top,
-			content,
-			lipgloss.WithWhitespaceChars(" "),
-		) + "\n" + modalView
+		return m.overlayAtPosition(content, modalView, 0, 0)
 	}
 
 	// Overlay help modal if visible
 	if m.helpModal.IsVisible() {
 		modalView := m.helpModal.View(m.width, m.height)
-		return lipgloss.Place(m.width, m.height,
-			lipgloss.Left, lipgloss.Top,
-			content,
-			lipgloss.WithWhitespaceChars(" "),
-		) + "\n" + modalView
+		return m.overlayAtPosition(content, modalView, 0, 0)
 	}
 
 	// Overlay config modal if visible
 	if m.configModal.IsVisible() {
 		modalView := m.configModal.View(m.width, m.height)
-		return lipgloss.Place(m.width, m.height,
-			lipgloss.Left, lipgloss.Top,
-			content,
-			lipgloss.WithWhitespaceChars(" "),
-		) + "\n" + modalView
+		return m.overlayAtPosition(content, modalView, 0, 0)
 	}
 
 	// Overlay toast notification if visible
@@ -1913,6 +1907,125 @@ func (m Model) overlayToast(content string) string {
 	}
 
 	return strings.Join(contentLines, "\n")
+}
+
+// overlayAtPosition overlays content at the given x/y position.
+// If overlay contains left/top margin lines, pass x=0/y=0 and margins are preserved.
+func (m Model) overlayAtPosition(content, overlay string, x, y int) string {
+	contentLines := strings.Split(content, "\n")
+	overlayLines := strings.Split(overlay, "\n")
+
+	for len(contentLines) < m.height {
+		contentLines = append(contentLines, "")
+	}
+
+	for i, overlayLine := range overlayLines {
+		targetY := y + i
+		if targetY < 0 || targetY >= len(contentLines) {
+			continue
+		}
+
+		if overlayLine == "" {
+			continue
+		}
+
+		leadingSpaces := countLeadingSpaces(overlayLine)
+		targetX := x + leadingSpaces
+		overlaySegment := overlayLine[leadingSpaces:]
+		if overlaySegment == "" {
+			continue
+		}
+		overlaySegmentWidth := lipgloss.Width(overlayLine) - leadingSpaces
+		if overlaySegmentWidth <= 0 {
+			continue
+		}
+		overlaySegment = fitAnsiWidth(overlaySegment, overlaySegmentWidth)
+
+		contentLine := contentLines[targetY]
+		contentLineWidth := lipgloss.Width(contentLine)
+		if contentLineWidth <= targetX {
+			padding := strings.Repeat(" ", targetX-contentLineWidth)
+			contentLines[targetY] = contentLine + padding + "\x1b[0m" + overlaySegment
+			continue
+		}
+
+		prefix := truncateWithAnsi(contentLine, targetX)
+		suffix := ansiSuffixFromWidth(contentLine, targetX+overlaySegmentWidth)
+		contentLines[targetY] = prefix + "\x1b[0m" + overlaySegment + "\x1b[0m" + suffix
+	}
+
+	return strings.Join(contentLines, "\n")
+}
+
+func countLeadingSpaces(s string) int {
+	count := 0
+	for _, r := range s {
+		if r != ' ' {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func fitAnsiWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	current := lipgloss.Width(s)
+	if current > width {
+		return truncateWithAnsi(s, width)
+	}
+	if current < width {
+		return s + strings.Repeat(" ", width-current)
+	}
+	return s
+}
+
+// ansiSuffixFromWidth returns the substring after visual column `start`.
+// ANSI escape sequences do not count toward visual width.
+func ansiSuffixFromWidth(s string, start int) string {
+	if start <= 0 {
+		return s
+	}
+
+	var b strings.Builder
+	visualWidth := 0
+	inEscape := false
+	started := false
+
+	for _, r := range s {
+		if inEscape {
+			if started {
+				b.WriteRune(r)
+			}
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+
+		if r == '\x1b' {
+			inEscape = true
+			if started {
+				b.WriteRune(r)
+			}
+			continue
+		}
+
+		if !started {
+			if visualWidth >= start {
+				started = true
+				b.WriteRune(r)
+			}
+			visualWidth++
+			continue
+		}
+
+		b.WriteRune(r)
+	}
+
+	return b.String()
 }
 
 // truncateWithAnsi truncates a string to a visual width, preserving ANSI codes

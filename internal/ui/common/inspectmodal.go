@@ -290,8 +290,12 @@ func (m InspectModal) View(screenWidth, screenHeight int) string {
 	}
 	content.WriteString(MutedInlineStyle.Render("esc/i/q: close"))
 
-	// Style the modal
-	modalContent := ModalStyle.Render(content.String())
+	// Style the modal (no background fill; border-only overlay)
+	modalStyle := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(primaryColor).
+		Padding(1, 2)
+	modalContent := modalStyle.Render(content.String())
 
 	// Get modal dimensions
 	modalWidth := lipgloss.Width(modalContent)
