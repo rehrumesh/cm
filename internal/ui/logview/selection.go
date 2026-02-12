@@ -6,10 +6,11 @@ import (
 
 // Selection tracks mouse text selection state with character-level precision
 type Selection struct {
-	Active  bool // Whether a selection is in progress
-	PaneIdx int  // Which pane is being selected in
-	PaneX   int  // Pane's X offset on screen
-	PaneY   int  // Pane's Y offset on screen
+	Selecting bool // Whether a drag selection is in progress
+	Selected  bool // Whether there is a finalized selection
+	PaneIdx   int  // Which pane is being selected in
+	PaneX     int  // Pane's X offset on screen
+	PaneY     int  // Pane's Y offset on screen
 
 	// Start position (where mouse was pressed)
 	StartLine int // Line number relative to viewport content
@@ -23,14 +24,16 @@ type Selection struct {
 // NewSelection creates a new empty selection
 func NewSelection() Selection {
 	return Selection{
-		Active:  false,
-		PaneIdx: -1,
+		Selecting: false,
+		Selected:  false,
+		PaneIdx:   -1,
 	}
 }
 
 // Start begins a new selection at the given screen position
 func (s *Selection) Start(screenX, screenY, paneIdx, paneX, paneY int) {
-	s.Active = true
+	s.Selecting = true
+	s.Selected = false
 	s.PaneIdx = paneIdx
 	s.PaneX = paneX
 	s.PaneY = paneY
@@ -45,11 +48,22 @@ func (s *Selection) Start(screenX, screenY, paneIdx, paneX, paneY int) {
 
 // Update updates the selection end position
 func (s *Selection) Update(screenX, screenY int) {
-	if !s.Active {
+	if !s.Selecting {
 		return
 	}
 	s.EndLine, s.EndCol = s.screenToLineCol(screenX, screenY)
 	debug.Log("Selection.Update: screen(%d,%d) -> endLine=%d endCol=%d", screenX, screenY, s.EndLine, s.EndCol)
+}
+
+// Finalize completes the current drag selection and makes it persistent.
+// Returns true if a non-empty selection exists after finalizing.
+func (s *Selection) Finalize() bool {
+	if !s.Selecting {
+		return s.HasSelectedText()
+	}
+	s.Selected = s.hasRangeSelection()
+	s.Selecting = false
+	return s.Selected
 }
 
 // screenToLineCol converts screen coordinates to line and column
@@ -74,14 +88,15 @@ func (s *Selection) screenToLineCol(screenX, screenY int) (line, col int) {
 
 // Clear clears the selection
 func (s *Selection) Clear() {
-	s.Active = false
+	s.Selecting = false
+	s.Selected = false
 	s.PaneIdx = -1
 }
 
 // GetNormalizedRange returns the selection range with start before end
 // Returns (startLine, startCol, endLine, endCol)
 func (s *Selection) GetNormalizedRange() (startLine, startCol, endLine, endCol int) {
-	if !s.Active {
+	if s.PaneIdx < 0 {
 		return 0, 0, 0, 0
 	}
 
@@ -98,11 +113,15 @@ func (s *Selection) GetNormalizedRange() (startLine, startCol, endLine, endCol i
 	return startLine, startCol, endLine, endCol
 }
 
-// HasSelection returns true if there's an active selection with actual range
-func (s *Selection) HasSelection() bool {
-	if !s.Active {
+// HasSelectedText returns true if there's a selection with non-zero range.
+func (s *Selection) HasSelectedText() bool {
+	if !s.Selecting && !s.Selected {
 		return false
 	}
+	return s.hasRangeSelection()
+}
+
+func (s *Selection) hasRangeSelection() bool {
 	startLine, startCol, endLine, endCol := s.GetNormalizedRange()
 	// Has selection if spans multiple lines or multiple columns
 	return endLine > startLine || endCol > startCol

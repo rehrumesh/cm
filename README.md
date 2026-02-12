@@ -220,6 +220,7 @@ Monitor logs from selected containers:
 | `R` | Compose down/up focused service |
 | `b` | Build (no-cache) and up focused service |
 | `e` | Open shell in focused container |
+| `Ctrl+C` | Copy selected text |
 | `y` | Copy logs to clipboard |
 | `w` | Toggle word wrap |
 | `?` | Show keyboard shortcuts help |
@@ -230,6 +231,8 @@ Monitor logs from selected containers:
 | Mouse | Action |
 |-------|--------|
 | Click | Focus pane |
+| Click + drag | Select text |
+| Right-click | Copy selected text |
 | Double-click | Maximize/restore pane |
 | Scroll | Scroll pane logs |
 

@@ -177,6 +177,7 @@ func (m HelpModal) View(screenWidth, screenHeight int) string {
 			items: []struct{ key, desc string }{
 				{formatKey(m.kb.ClearLogs), "Clear logs in focused pane"},
 				{formatKey(m.kb.PauseLogs), "Pause/resume log streaming"},
+				{"Right-click / ctrl+c", "Copy selected text"},
 				{formatKey(m.kb.CopyLogs), "Copy all logs to clipboard"},
 				{formatKey(m.kb.WordWrap), "Toggle word wrap"},
 				{formatKey(m.kb.Search), "Search/filter logs"},

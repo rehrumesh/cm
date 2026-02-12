@@ -80,11 +80,11 @@ type KeyBindings struct {
 	Pane9 string `json:"pane_9"`
 
 	// Pane resize
-	ResizeLeft   string `json:"resize_left"`
-	ResizeRight  string `json:"resize_right"`
-	ResizeUp     string `json:"resize_up"`
-	ResizeDown   string `json:"resize_down"`
-	ResizeReset  string `json:"resize_reset"`
+	ResizeLeft  string `json:"resize_left"`
+	ResizeRight string `json:"resize_right"`
+	ResizeUp    string `json:"resize_up"`
+	ResizeDown  string `json:"resize_down"`
+	ResizeReset string `json:"resize_reset"`
 }
 
 // DefaultKeyBindings returns the default key bindings
@@ -128,7 +128,7 @@ func DefaultKeyBindings() KeyBindings {
 		Refresh:       "ctrl+r",
 		Search:        "/",
 		Help:          "?",
-		Quit:          "q,ctrl+c",
+		Quit:          "q",
 		SavedProjects: "p",
 		Config:        "c",
 		CopyLogs:      "y",
@@ -545,4 +545,3 @@ func EnsureDefaults() error {
 
 	return nil
 }
-

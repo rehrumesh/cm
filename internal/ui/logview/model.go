@@ -535,6 +535,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.tutorial.Skip()
 			return m, nil
 		}
+		// Ctrl+C copies selected text in log view and never quits.
+		// This avoids conflicting with terminal-native copy expectations.
+		if msg.String() == "ctrl+c" {
+			cmd := m.copySelectedRange()
+			if cmd != nil {
+				return m, cmd
+			}
+			return m, nil
+		}
 
 		switch {
 		case key.Matches(msg, m.keys.Back):
@@ -1412,6 +1421,8 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 				return nil
 			}
 			return m.handleMouseClick(msg)
+		case tea.MouseButtonRight:
+			return m.copySelectedRange()
 		}
 
 	case tea.MouseActionMotion:
@@ -1421,8 +1432,8 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			return nil
 		}
 
-		// Update selection if one is active
-		if m.selection.Active {
+		// Update selection while dragging
+		if m.selection.Selecting {
 			m.selection.Update(msg.X, msg.Y)
 			// Update visual selection in the pane with character-level precision
 			paneIdx := m.selection.PaneIdx
@@ -1440,29 +1451,16 @@ func (m *Model) handleMouse(msg tea.MouseMsg) tea.Cmd {
 			return nil
 		}
 
-		// Finalize selection and copy to clipboard
-		if m.selection.Active && m.selection.HasSelection() {
-			paneIdx := m.selection.PaneIdx
-			if paneIdx >= 0 && paneIdx < len(m.panes) {
-				pane := &m.panes[paneIdx]
-				startLine, startCol, endLine, endCol := m.selection.GetNormalizedRange()
-				text := pane.GetTextInRangeChar(startLine, startCol, endLine, endCol)
-				// Clear selection highlighting
-				pane.ClearSelection()
-				if text != "" {
-					clipboard.WriteAll(text)
-					// Count characters or lines for toast message
-					charCount := len([]rune(text))
-					m.selection.Clear()
-					return m.toast.Show("Copied", fmt.Sprintf("%d chars", charCount), common.ToastSuccess)
+		// Finalize selection only; do not auto-copy.
+		if m.selection.Selecting {
+			hasSelection := m.selection.Finalize()
+			if !hasSelection {
+				if m.selection.PaneIdx >= 0 && m.selection.PaneIdx < len(m.panes) {
+					m.panes[m.selection.PaneIdx].ClearSelection()
 				}
+				m.selection.Clear()
 			}
 		}
-		// Clear selection highlighting if there was an active selection
-		if m.selection.Active && m.selection.PaneIdx >= 0 && m.selection.PaneIdx < len(m.panes) {
-			m.panes[m.selection.PaneIdx].ClearSelection()
-		}
-		m.selection.Clear()
 	}
 	return nil
 }
@@ -1524,11 +1522,40 @@ func (m *Model) handleMouseClick(msg tea.MouseMsg) tea.Cmd {
 	m.lastClickTime = now
 	m.lastClickPaneID = pane.ID
 
+	// Clear prior selection highlight before starting a new selection.
+	if m.selection.PaneIdx >= 0 && m.selection.PaneIdx < len(m.panes) {
+		m.panes[m.selection.PaneIdx].ClearSelection()
+	}
+	m.selection.Clear()
+
 	// Start selection for potential drag
 	paneX, paneY := m.getPanePosition(paneIdx)
 	m.selection.Start(msg.X, msg.Y, paneIdx, paneX, paneY)
 
 	return nil
+}
+
+// copySelectedRange copies the currently selected text range to clipboard.
+func (m *Model) copySelectedRange() tea.Cmd {
+	if !m.selection.HasSelectedText() {
+		return nil
+	}
+	paneIdx := m.selection.PaneIdx
+	if paneIdx < 0 || paneIdx >= len(m.panes) {
+		return nil
+	}
+	pane := &m.panes[paneIdx]
+	startLine, startCol, endLine, endCol := m.selection.GetNormalizedRange()
+	text := pane.GetTextInRangeChar(startLine, startCol, endLine, endCol)
+	if text == "" {
+		return nil
+	}
+	if err := clipboard.WriteAll(text); err != nil {
+		return m.toast.Show("Copy failed", err.Error(), common.ToastError)
+	}
+	charCount := len([]rune(text))
+	debug.Log("Copied %d chars from selected range in %s", charCount, pane.Container.DisplayName())
+	return m.toast.Show("Copied", fmt.Sprintf("%d chars", charCount), common.ToastSuccess)
 }
 
 func (m *Model) setFocus(index int) {

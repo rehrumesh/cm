@@ -62,7 +62,7 @@ KEYBINDINGS
   p               Manage saved projects
   c               Open configuration
   ctrl+g          Toggle debug logging
-  q, ctrl+c       Quit
+  q               Quit
 
 CONFIG FILES
   ~/.cm/config.json        General settings
