@@ -7,6 +7,7 @@ import (
 	"cm/internal/ui/logview"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // Screen represents the current screen
@@ -60,6 +61,15 @@ func (a App) Init() tea.Cmd {
 // Update handles messages
 func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		// Always honor terminal interrupt semantics.
+		if msg.String() == "ctrl+c" {
+			if a.screen == ScreenLogView {
+				a.logview.Cleanup()
+			}
+			return a, tea.Quit
+		}
+
 	case tea.WindowSizeMsg:
 		a.width = msg.Width
 		a.height = msg.Height
@@ -105,12 +115,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View renders the application
 func (a App) View() string {
+	var content string
 	switch a.screen {
 	case ScreenDiscovery:
-		return a.discovery.View()
+		content = a.discovery.View()
 	case ScreenLogView:
-		return a.logview.View()
+		content = a.logview.View()
 	default:
-		return "Unknown screen"
+		content = "Unknown screen"
 	}
+
+	// Always paint a full frame to avoid stale cells/background artifacts.
+	if a.width > 0 && a.height > 0 {
+		return lipgloss.NewStyle().
+			Width(a.width).
+			Height(a.height).
+			Render(content)
+	}
+
+	return content
 }

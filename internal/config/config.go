@@ -63,6 +63,7 @@ type KeyBindings struct {
 	SavedProjects string `json:"saved_projects_key"`
 	Config        string `json:"config"`
 	CopyLogs      string `json:"copy_logs"`
+	CopySelection string `json:"copy_selection"`
 	WordWrap      string `json:"word_wrap"`
 	DebugToggle   string `json:"debug_toggle"`
 	ClearLogs     string `json:"clear_logs"`
@@ -132,6 +133,7 @@ func DefaultKeyBindings() KeyBindings {
 		SavedProjects: "p",
 		Config:        "c",
 		CopyLogs:      "y",
+		CopySelection: "ctrl+shift+c",
 		WordWrap:      "w",
 		DebugToggle:   "ctrl+g",
 		ClearLogs:     "ctrl+l",
@@ -346,6 +348,7 @@ func LoadKeyBindings() KeyBindings {
 	setDefault(&kb.SavedProjects, defaults.SavedProjects)
 	setDefault(&kb.Config, defaults.Config)
 	setDefault(&kb.CopyLogs, defaults.CopyLogs)
+	setDefault(&kb.CopySelection, defaults.CopySelection)
 	setDefault(&kb.WordWrap, defaults.WordWrap)
 	setDefault(&kb.DebugToggle, defaults.DebugToggle)
 	setDefault(&kb.ClearLogs, defaults.ClearLogs)

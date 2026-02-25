@@ -57,6 +57,7 @@ KEYBINDINGS
   enter           Confirm and view logs
   u/s/r           Start/stop/restart container
   b               Build and restart (compose)
+  ctrl+shift+c    Copy selected text
   y               Copy logs to clipboard
   w               Toggle word wrap
   p               Manage saved projects

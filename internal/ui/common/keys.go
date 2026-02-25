@@ -52,6 +52,7 @@ type KeyMap struct {
 	SavedProjects key.Binding
 	Quit          key.Binding
 	CopyLogs      key.Binding
+	CopySelection key.Binding
 	WordWrap      key.Binding
 	DebugToggle   key.Binding
 	ClearLogs     key.Binding
@@ -237,6 +238,10 @@ func DefaultKeyMap() KeyMap {
 		CopyLogs: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.CopyLogs)...),
 			key.WithHelp("y", "copy logs"),
+		),
+		CopySelection: key.NewBinding(
+			key.WithKeys(parseKeys(bindings.CopySelection)...),
+			key.WithHelp("ctrl+shift+c", "copy selection"),
 		),
 		WordWrap: key.NewBinding(
 			key.WithKeys(parseKeys(bindings.WordWrap)...),

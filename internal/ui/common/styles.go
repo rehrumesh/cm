@@ -40,7 +40,8 @@ var (
 
 	// Status styles
 	RunningStyle = lipgloss.NewStyle().
-			Foreground(successColor)
+			Foreground(lipgloss.Color("10")).
+			Bold(true)
 
 	StoppedStyle = lipgloss.NewStyle().
 			Foreground(errorColor)
@@ -102,7 +103,6 @@ var (
 	ModalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(primaryColor).
-			Background(lipgloss.Color("235")).
 			Padding(1, 2)
 
 	ModalTitleStyle = lipgloss.NewStyle().

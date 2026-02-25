@@ -181,7 +181,6 @@ func (t Toast) RenderInline() string {
 	toastStyle := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(borderColor).
-		Background(lipgloss.Color("236")).
 		Padding(0, 2)
 
 	return toastStyle.Render(content)

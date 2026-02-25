@@ -220,7 +220,8 @@ Monitor logs from selected containers:
 | `R` | Compose down/up focused service |
 | `b` | Build (no-cache) and up focused service |
 | `e` | Open shell in focused container |
-| `Ctrl+C` | Copy selected text |
+| `Ctrl+Shift+C` | Copy selected text |
+| `Ctrl+C` | Quit (interrupt) |
 | `y` | Copy logs to clipboard |
 | `w` | Toggle word wrap |
 | `?` | Show keyboard shortcuts help |

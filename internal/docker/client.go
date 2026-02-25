@@ -22,6 +22,8 @@ var (
 	composeServicesCacheLock sync.RWMutex
 	composeServicesCacheTime = make(map[string]time.Time)
 	cacheExpiry              = 30 * time.Second // Cache for 30 seconds
+	composeCmdTimeout        = 2 * time.Second
+	maxComposeWorkers        = 4
 
 	// Config cache to avoid loading from disk on every refresh
 	configCache     *config.Config
@@ -179,18 +181,44 @@ func (c *Client) getStoppedComposeServices(containers []Container, projectInfo m
 		}
 	}
 
-	var stopped []Container
+	type stoppedResult struct {
+		project  string
+		services []string
+	}
+
+	results := make(chan stoppedResult, len(projectInfo))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, maxComposeWorkers)
+
 	for project, info := range projectInfo {
-		// Get all services from compose config using the actual file path
-		services := getComposeServices(project, info.configFile, info.workingDir)
-		for _, svc := range services {
-			if !runningServices[project][svc] {
+		project := project
+		info := info
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			services := getComposeServices(project, info.configFile, info.workingDir)
+			results <- stoppedResult{project: project, services: services}
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	stopped := make([]Container, 0)
+	for result := range results {
+		for _, svc := range result.services {
+			if !runningServices[result.project][svc] {
 				stopped = append(stopped, Container{
-					ID:             fmt.Sprintf("stopped:%s:%s", project, svc), // Unique ID for stopped services
-					Name:           fmt.Sprintf("%s-%s", project, svc),
+					ID:             fmt.Sprintf("stopped:%s:%s", result.project, svc), // Unique ID for stopped services
+					Name:           fmt.Sprintf("%s-%s", result.project, svc),
 					Status:         "Not started",
 					State:          "stopped",
-					ComposeProject: project,
+					ComposeProject: result.project,
 					ComposeService: svc,
 				})
 			}
@@ -347,7 +375,10 @@ func getComposeServices(project, configFile, workingDir string) []string {
 
 	args = append(args, "-p", project, "config", "--services")
 
-	cmd := exec.Command("docker", append([]string{"compose"}, args...)...)
+	cmdCtx, cancel := context.WithTimeout(context.Background(), composeCmdTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(cmdCtx, "docker", append([]string{"compose"}, args...)...)
 
 	// Set working directory if available
 	if workingDir != "" {

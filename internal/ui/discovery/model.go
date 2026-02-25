@@ -867,8 +867,7 @@ func (m Model) View() string {
 			content,
 			lipgloss.WithWhitespaceChars(" "),
 		)
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
-			base+"\n"+modalView)
+		return m.overlayAtPosition(base, modalView, 0, 0)
 	}
 
 	// Overlay config modal if visible
@@ -879,8 +878,7 @@ func (m Model) View() string {
 			content,
 			lipgloss.WithWhitespaceChars(" "),
 		)
-		return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center,
-			base+"\n"+modalView)
+		return m.overlayAtPosition(base, modalView, 0, 0)
 	}
 
 	// Overlay tutorial intro modal if at intro step
@@ -976,6 +974,172 @@ func (m Model) GetTutorial() common.Tutorial {
 	return m.tutorial
 }
 
+// overlayAtPosition overlays content at the given x/y position.
+// If overlay contains left/top margin lines, pass x=0/y=0 and margins are preserved.
+func (m Model) overlayAtPosition(content, overlay string, x, y int) string {
+	contentLines := strings.Split(content, "\n")
+	overlayLines := strings.Split(overlay, "\n")
+
+	for len(contentLines) < m.height {
+		contentLines = append(contentLines, "")
+	}
+
+	for i, overlayLine := range overlayLines {
+		targetY := y + i
+		if targetY < 0 || targetY >= len(contentLines) {
+			continue
+		}
+
+		if overlayLine == "" {
+			continue
+		}
+
+		leadingSpaces := countLeadingSpaces(overlayLine)
+		targetX := x + leadingSpaces
+		overlaySegment := overlayLine[leadingSpaces:]
+		if overlaySegment == "" {
+			continue
+		}
+		overlaySegmentWidth := lipgloss.Width(overlayLine) - leadingSpaces
+		if overlaySegmentWidth <= 0 {
+			continue
+		}
+		overlaySegment = fitAnsiWidth(overlaySegment, overlaySegmentWidth)
+
+		contentLine := contentLines[targetY]
+		contentLineWidth := lipgloss.Width(contentLine)
+		if contentLineWidth <= targetX {
+			padding := strings.Repeat(" ", targetX-contentLineWidth)
+			contentLines[targetY] = contentLine + padding + "\x1b[0m" + overlaySegment
+			continue
+		}
+
+		prefix := truncateWithAnsi(contentLine, targetX)
+		suffix := ansiSuffixFromWidth(contentLine, targetX+overlaySegmentWidth)
+		contentLines[targetY] = prefix + "\x1b[0m" + overlaySegment + "\x1b[0m" + suffix
+	}
+
+	return strings.Join(contentLines, "\n")
+}
+
+func countLeadingSpaces(s string) int {
+	count := 0
+	for _, r := range s {
+		if r != ' ' {
+			break
+		}
+		count++
+	}
+	return count
+}
+
+func fitAnsiWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	current := lipgloss.Width(s)
+	if current > width {
+		return truncateWithAnsi(s, width)
+	}
+	if current < width {
+		return s + strings.Repeat(" ", width-current)
+	}
+	return s
+}
+
+// ansiSuffixFromWidth returns the substring after visual column `start`.
+// ANSI escape sequences do not count toward visual width.
+func ansiSuffixFromWidth(s string, start int) string {
+	if start <= 0 {
+		return s
+	}
+
+	var b strings.Builder
+	visualWidth := 0
+	inEscape := false
+	started := false
+
+	for _, r := range s {
+		if inEscape {
+			if started {
+				b.WriteRune(r)
+			}
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+
+		if r == '\x1b' {
+			inEscape = true
+			if started {
+				b.WriteRune(r)
+			}
+			continue
+		}
+
+		if !started {
+			if visualWidth >= start {
+				started = true
+				b.WriteRune(r)
+			}
+			visualWidth++
+			continue
+		}
+
+		b.WriteRune(r)
+	}
+
+	return b.String()
+}
+
+// truncateWithAnsi truncates a string to a visual width, preserving ANSI codes.
+func truncateWithAnsi(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	var result strings.Builder
+	visualWidth := 0
+	inEscape := false
+	escapeSeq := strings.Builder{}
+
+	for _, r := range s {
+		if inEscape {
+			escapeSeq.WriteRune(r)
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				result.WriteString(escapeSeq.String())
+				escapeSeq.Reset()
+				inEscape = false
+			}
+			continue
+		}
+
+		if r == '\x1b' {
+			inEscape = true
+			escapeSeq.WriteRune(r)
+			continue
+		}
+
+		if visualWidth >= width {
+			break
+		}
+		result.WriteRune(r)
+		visualWidth++
+	}
+
+	if escapeSeq.Len() > 0 {
+		result.WriteString(escapeSeq.String())
+	}
+
+	for visualWidth < width {
+		result.WriteRune(' ')
+		visualWidth++
+	}
+
+	return result.String()
+}
+
 // renderWithBuildPanel renders the discovery view with the build panel on the right
 func (m Model) renderWithBuildPanel(mainContent string) string {
 	width := m.width
@@ -1023,4 +1187,3 @@ func (m Model) renderWithBuildPanel(mainContent string) string {
 	// Join with help bar
 	return lipgloss.JoinVertical(lipgloss.Left, contentArea, helpBar)
 }
-

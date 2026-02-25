@@ -535,15 +535,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.tutorial.Skip()
 			return m, nil
 		}
-		// Ctrl+C copies selected text in log view and never quits.
-		// This avoids conflicting with terminal-native copy expectations.
-		if msg.String() == "ctrl+c" {
-			cmd := m.copySelectedRange()
-			if cmd != nil {
-				return m, cmd
-			}
-			return m, nil
-		}
 
 		switch {
 		case key.Matches(msg, m.keys.Back):
@@ -808,6 +799,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 						cmds = append(cmds, m.toast.Show("Copied", fmt.Sprintf("%d lines", lineCount), common.ToastSuccess))
 					}
 				}
+			}
+
+		case key.Matches(msg, m.keys.CopySelection):
+			cmd := m.copySelectedRange()
+			if cmd != nil {
+				cmds = append(cmds, cmd)
 			}
 
 		case key.Matches(msg, m.keys.WordWrap):
