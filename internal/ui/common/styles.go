@@ -6,7 +6,7 @@ var (
 	// Colors
 	primaryColor   = lipgloss.Color("39")  // Blue
 	secondaryColor = lipgloss.Color("170") // Purple
-	successColor   = lipgloss.Color("42")  // Green
+	successColor   = lipgloss.Color("#00ff66") // Green (truecolor for terminal consistency)
 	errorColor     = lipgloss.Color("196") // Red
 	mutedColor     = lipgloss.Color("241") // Gray
 	borderColor    = lipgloss.Color("240") // Light gray
@@ -40,8 +40,7 @@ var (
 
 	// Status styles
 	RunningStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("10")).
-			Bold(true)
+			Foreground(successColor)
 
 	StoppedStyle = lipgloss.NewStyle().
 			Foreground(errorColor)
