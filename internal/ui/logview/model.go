@@ -259,6 +259,11 @@ func New(containers []docker.Container, dockerClient *docker.Client, width, heig
 
 	if len(m.panes) > 0 {
 		m.panes[0].Active = true
+		if len(m.panes) == 1 {
+			// Single-pane sessions are more useful in maximized/tab mode.
+			m.maximizedPane = 0
+			m.panes[0].SetActiveTab(TabLogs)
+		}
 	}
 
 	return m
@@ -538,6 +543,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		switch {
 		case key.Matches(msg, m.keys.Back):
+			// Single-pane sessions should leave log view immediately.
+			if m.maximizedPane != -1 && len(m.panes) == 1 {
+				m.cancel()
+				return m, func() tea.Msg { return BackToDiscoveryMsg{} }
+			}
 			// If a pane is maximized, un-maximize it first
 			if m.maximizedPane != -1 {
 				// Stop any active tab streaming when un-maximizing
@@ -580,6 +590,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					m.panes[m.focusedPane].SetActiveTab(TabLogs)
 				}
 			} else {
+				// Single-pane sessions should return to the list when leaving maximized mode.
+				if len(m.panes) == 1 {
+					m.cancel()
+					return m, func() tea.Msg { return BackToDiscoveryMsg{} }
+				}
 				// Stop any active tab streaming when un-maximizing
 				m.stopStatsStreaming()
 				m.stopTopPolling()
@@ -1507,6 +1522,11 @@ func (m *Model) handleMouseClick(msg tea.MouseMsg) tea.Cmd {
 		if m.maximizedPane == -1 {
 			m.maximizedPane = paneIdx
 		} else {
+			if len(m.panes) == 1 {
+				m.cancel()
+				m.lastClickPaneID = ""
+				return func() tea.Msg { return BackToDiscoveryMsg{} }
+			}
 			m.maximizedPane = -1
 		}
 		m.recalculateLayout()
