@@ -11,6 +11,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/viewport"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/muesli/reflow/wrap"
 )
 
@@ -676,6 +677,7 @@ func (p *Pane) renderLogsWithSelection(selStartLine, selEndLine int) (result str
 	for _, line := range p.LogLines {
 		// Get plain content
 		plainContent := stripANSI(line.Content)
+		hasANSIContent := strings.Contains(line.Content, "\x1b[")
 
 		// Determine styling based on stream type
 		applyStyle := func(text string) string {
@@ -693,8 +695,14 @@ func (p *Pane) renderLogsWithSelection(selStartLine, selEndLine int) (result str
 		}
 
 		if p.wordWrap {
+			contentForWrap := plainContent
+			// Preserve source ANSI styling for stdout logs while wrapped.
+			if hasANSIContent && line.Stream == "stdout" {
+				contentForWrap = line.Content
+			}
+
 			// Word wrap mode: hard wrap content to fit width (breaks long words)
-			wrapped := wrap.String(plainContent, contentWidth)
+			wrapped := wrap.String(contentForWrap, contentWidth)
 			wrappedLines := strings.Split(wrapped, "\n")
 
 			for i, wline := range wrappedLines {
@@ -712,7 +720,8 @@ func (p *Pane) renderLogsWithSelection(selStartLine, selEndLine int) (result str
 
 				styledLine := applyStyle(wline)
 				if isSelected {
-					styledLine = selStyle.Render(wline)
+					// Selection styling should operate on printable text only.
+					styledLine = selStyle.Render(stripANSI(wline))
 				}
 
 				b.WriteString(fmt.Sprintf("%s %s%s\n", ts, styledLine, ansiReset))
@@ -727,25 +736,17 @@ func (p *Pane) renderLogsWithSelection(selStartLine, selEndLine int) (result str
 				ts = selStyle.Render(line.Timestamp.Format("15:04:05"))
 			}
 
-			// Apply horizontal scroll offset
-			displayContent := plainContent
-			if p.xOffset > 0 {
-				runes := []rune(plainContent)
-				if p.xOffset < len(runes) {
-					displayContent = string(runes[p.xOffset:])
-				} else {
-					displayContent = ""
-				}
-			}
+			// Apply horizontal scroll offset and clip to viewport width.
+			displayContent := cutPlainByWidth(plainContent, p.xOffset, contentWidth)
 
 			content := applyStyle(displayContent)
 			if isSelected {
 				content = selStyle.Render(displayContent)
 			}
 
-			// If original had ANSI codes and not selected and no offset, use original
-			if !isSelected && p.xOffset == 0 && strings.Contains(line.Content, "\x1b[") && line.Stream == "stdout" {
-				content = line.Content
+			// Preserve ANSI colors for stdout while clipping to the visible window.
+			if !isSelected && strings.Contains(line.Content, "\x1b[") && line.Stream == "stdout" {
+				content = xansi.Cut(line.Content, p.xOffset, p.xOffset+contentWidth)
 			}
 
 			b.WriteString(fmt.Sprintf("%s %s%s\n", ts, content, ansiReset))
@@ -914,6 +915,24 @@ func stripANSI(s string) string {
 	return ansiRe.ReplaceAllString(s, "")
 }
 
+func cutPlainByWidth(s string, left, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	if left < 0 {
+		left = 0
+	}
+	runes := []rune(s)
+	if left >= len(runes) {
+		return ""
+	}
+	right := left + width
+	if right > len(runes) {
+		right = len(runes)
+	}
+	return string(runes[left:right])
+}
+
 // GetPlainTextLogs returns all log lines as plain text (no ANSI codes)
 func (p *Pane) GetPlainTextLogs() string {
 	if len(p.LogLines) == 0 {
@@ -1009,7 +1028,11 @@ func (p *Pane) renderBuildLogs() string {
 		}
 
 		if p.wordWrap {
-			wrapped := wrap.String(stripANSI(log.Content), contentWidth)
+			contentForWrap := stripANSI(log.Content)
+			if strings.Contains(log.Content, "\x1b[") && log.Stream == "stdout" {
+				contentForWrap = log.Content
+			}
+			wrapped := wrap.String(contentForWrap, contentWidth)
 			wrappedLines := strings.Split(wrapped, "\n")
 			for i, wline := range wrappedLines {
 				if i == 0 {
